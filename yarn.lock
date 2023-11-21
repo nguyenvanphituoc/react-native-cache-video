@@ -2905,6 +2905,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@react-native/normalize-color@npm:*":
+  version: 2.1.0
+  resolution: "@react-native/normalize-color@npm:2.1.0"
+  checksum: 8ccbd40b3c7629f1dc97b3e9aadd95fd3507fcf2e37535a6299a70436ab891c34cbdc4240b07380553d6e85dd909e23d5773b5be1da2906b026312e0b0768838
+  languageName: node
+  linkType: hard
+
 "@react-native/normalize-colors@npm:*":
   version: 0.74.1
   resolution: "@react-native/normalize-colors@npm:0.74.1"
@@ -2919,7 +2926,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@react-native/virtualized-lists@npm:^0.72.8":
+"@react-native/virtualized-lists@npm:^0.72.4, @react-native/virtualized-lists@npm:^0.72.8":
   version: 0.72.8
   resolution: "@react-native/virtualized-lists@npm:0.72.8"
   dependencies:
@@ -3209,6 +3216,26 @@ __metadata:
   version: 15.7.10
   resolution: "@types/prop-types@npm:15.7.10"
   checksum: 39ecc2d9e439ed16b32937a08d98b84ed4a70f53bcd52c8564c0cd7a36fe1004ca83a1fb94b13c1b7a5c048760f06445c3c6a91a6972c8eff652c0b50c9424b1
+  languageName: node
+  linkType: hard
+
+"@types/react-native-video@npm:^5.0.18":
+  version: 5.0.18
+  resolution: "@types/react-native-video@npm:5.0.18"
+  dependencies:
+    "@types/react": "*"
+    "@types/react-native": "*"
+  checksum: c17d63d1cc02664b267bfe6e61d07380d17ae23d169f6c90c69e3f53934dae7e5a6ea14e2e1d6ee66178bf378118ea596a12fafbb164f2422444f0bb7bc8c5fe
+  languageName: node
+  linkType: hard
+
+"@types/react-native@npm:*":
+  version: 0.72.6
+  resolution: "@types/react-native@npm:0.72.6"
+  dependencies:
+    "@react-native/virtualized-lists": ^0.72.4
+    "@types/react": "*"
+  checksum: 6fc6c847e451cd572e337e38c7c99817f9131d9a67c28be6c5aae2f45ee705c7498f4c25f0a2b8b3a3330c6c52d961c6fd9060063f3dbb587207470ed2d7d66b
   languageName: node
   linkType: hard
 
@@ -4041,6 +4068,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"base-64@npm:0.1.0":
+  version: 0.1.0
+  resolution: "base-64@npm:0.1.0"
+  checksum: 5a42938f82372ab5392cbacc85a5a78115cbbd9dbef9f7540fa47d78763a3a8bd7d598475f0d92341f66285afd377509851a9bb5c67bbecb89686e9255d5b3eb
+  languageName: node
+  linkType: hard
+
 "base64-js@npm:^1.1.2, base64-js@npm:^1.3.1":
   version: 1.5.1
   resolution: "base64-js@npm:1.5.1"
@@ -4174,7 +4208,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"buffer@npm:^5.5.0":
+"buffer@npm:^5.4.3, buffer@npm:^5.5.0":
   version: 5.7.1
   resolution: "buffer@npm:5.7.1"
   dependencies:
@@ -5341,6 +5375,17 @@ __metadata:
   languageName: node
   linkType: hard
 
+"deprecated-react-native-prop-types@npm:^2.2.0":
+  version: 2.3.0
+  resolution: "deprecated-react-native-prop-types@npm:2.3.0"
+  dependencies:
+    "@react-native/normalize-color": "*"
+    invariant: "*"
+    prop-types: "*"
+  checksum: d14f4be1dfe780a7fa9197a31b4a9a2b409c8cf1bf677713fd92d06733dee1043578662d1a8858541cf06164ae91d295db6e595f29bf13e808d9fb37bc58c90b
+  languageName: node
+  linkType: hard
+
 "deprecation@npm:^2.0.0":
   version: 2.3.1
   resolution: "deprecation@npm:2.3.1"
@@ -5439,6 +5484,13 @@ __metadata:
   version: 1.4.579
   resolution: "electron-to-chromium@npm:1.4.579"
   checksum: 42fcb8608c68f8c7568d1ef6cd48f6a2133f1089e26b203ead7eed47cf0c15ece66824de8076d51b11f2693598cec5cf756fbb67dfa7a70e7cdfaadd26ae257b
+  languageName: node
+  linkType: hard
+
+"eme-encryption-scheme-polyfill@npm:^2.0.1":
+  version: 2.1.1
+  resolution: "eme-encryption-scheme-polyfill@npm:2.1.1"
+  checksum: 5d67fac0f95cc7e2066c68a15d8ecfb508d0c3774d3b8a37013da1a3a6a25ce86d6f8e185d885aa802c1fca48a3348f13dd310e54966fb96faba833a1e62000b
   languageName: node
   linkType: hard
 
@@ -6663,7 +6715,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"glob@npm:^7.0.0, glob@npm:^7.1.3, glob@npm:^7.1.4":
+"glob@npm:^7.0.0, glob@npm:^7.1.3, glob@npm:^7.1.4, glob@npm:^7.2.3":
   version: 7.2.3
   resolution: "glob@npm:7.2.3"
   dependencies:
@@ -8651,6 +8703,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"keymirror@npm:^0.1.1":
+  version: 0.1.1
+  resolution: "keymirror@npm:0.1.1"
+  checksum: be8f0bc5ff7d561d729f935ef55b4dbbea7b56a4714f044a2212088730f4d52f73935c38c5a9604e0f1157611725ee493cb7d08d1f3eb34151c0aa999236206a
+  languageName: node
+  linkType: hard
+
 "keyv@npm:^4.5.3":
   version: 4.5.4
   resolution: "keyv@npm:4.5.4"
@@ -10610,7 +10669,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"prop-types@npm:*, prop-types@npm:^15.8.1":
+"prop-types@npm:*, prop-types@npm:^15.7.2, prop-types@npm:^15.8.1":
   version: 15.8.1
   resolution: "prop-types@npm:15.8.1"
   dependencies:
@@ -10668,7 +10727,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"punycode@npm:^2.1.0":
+"punycode@npm:^2.1.0, punycode@npm:^2.1.1":
   version: 2.3.1
   resolution: "punycode@npm:2.3.1"
   checksum: bb0a0ceedca4c3c57a9b981b90601579058903c62be23c5e8e843d2c2d4148a3ecf029d5133486fb0e1822b098ba8bba09e89d6b21742d02fa26bda6441a6fb2
@@ -10773,6 +10832,19 @@ __metadata:
   languageName: node
   linkType: hard
 
+"react-native-blob-util@npm:^0.19.2":
+  version: 0.19.2
+  resolution: "react-native-blob-util@npm:0.19.2"
+  dependencies:
+    base-64: 0.1.0
+    glob: ^7.2.3
+  peerDependencies:
+    react: "*"
+    react-native: "*"
+  checksum: 0785726be05488e2573953808bf19a5a96b6e1fdfb79311f0466a090f0a02efadc863314cc960fc829ff77d0ffbbb074710209ef5d2f7d89e5e63092e9c5cca0
+  languageName: node
+  linkType: hard
+
 "react-native-builder-bob@npm:^0.23.1":
   version: 0.23.1
   resolution: "react-native-builder-bob@npm:0.23.1"
@@ -10810,11 +10882,15 @@ __metadata:
     "@babel/preset-env": ^7.20.0
     "@babel/runtime": ^7.20.0
     "@react-native/metro-config": ^0.72.11
+    "@types/react-native-video": ^5.0.18
     babel-plugin-module-resolver: ^5.0.0
     metro-react-native-babel-preset: 0.76.8
     pod-install: ^0.1.0
     react: 18.2.0
     react-native: 0.72.6
+    react-native-blob-util: ^0.19.2
+    react-native-url-polyfill: ^2.0.0
+    react-native-video: ^5.2.1
   languageName: unknown
   linkType: soft
 
@@ -10839,15 +10915,42 @@ __metadata:
     prettier: ^2.0.5
     react: 18.2.0
     react-native: 0.72.6
+    react-native-blob-util: ^0.19.2
     react-native-builder-bob: ^0.23.1
+    react-native-url-polyfill: ^2.0.0
     release-it: ^15.0.0
     turbo: ^1.10.7
     typescript: ^5.0.2
   peerDependencies:
     react: "*"
     react-native: "*"
+    react-native-blob-util: "*"
+    react-native-url-polyfill: "*"
   languageName: unknown
   linkType: soft
+
+"react-native-url-polyfill@npm:^2.0.0":
+  version: 2.0.0
+  resolution: "react-native-url-polyfill@npm:2.0.0"
+  dependencies:
+    whatwg-url-without-unicode: 8.0.0-3
+  peerDependencies:
+    react-native: "*"
+  checksum: 1a2e1030a62fd093764b5330ce0ff34d72246e581dd2892cddc347d8621931aeb2c9ea3e054960484a1259230e8461e569e1890f1ff452d3c5c0adef70190fc3
+  languageName: node
+  linkType: hard
+
+"react-native-video@npm:^5.2.1":
+  version: 5.2.1
+  resolution: "react-native-video@npm:5.2.1"
+  dependencies:
+    deprecated-react-native-prop-types: ^2.2.0
+    keymirror: ^0.1.1
+    prop-types: ^15.7.2
+    shaka-player: ^2.5.9
+  checksum: efbc09a47e3080dde2986a3a1ea3f32b815317f99013c015522fd2e6ed937ed02244761f4dd5c8f5bf0260bf8a1d518315025cae499c16a6c3b1cd0fa6935d2d
+  languageName: node
+  linkType: hard
 
 "react-native@npm:0.72.6":
   version: 0.72.6
@@ -11636,6 +11739,15 @@ __metadata:
   version: 1.2.0
   resolution: "setprototypeof@npm:1.2.0"
   checksum: be18cbbf70e7d8097c97f713a2e76edf84e87299b40d085c6bf8b65314e994cc15e2e317727342fa6996e38e1f52c59720b53fe621e2eb593a6847bf0356db89
+  languageName: node
+  linkType: hard
+
+"shaka-player@npm:^2.5.9":
+  version: 2.5.23
+  resolution: "shaka-player@npm:2.5.23"
+  dependencies:
+    eme-encryption-scheme-polyfill: ^2.0.1
+  checksum: 219c5ab073edd0f70582809df533d29f0369a5d8e31507ea76ddc71f3c8e11e9b63b61671ce19d7d3c464d7f3035581a4820903535ce24d4d5da7a94a98ca064
   languageName: node
   linkType: hard
 
@@ -12958,10 +13070,28 @@ __metadata:
   languageName: node
   linkType: hard
 
+"webidl-conversions@npm:^5.0.0":
+  version: 5.0.0
+  resolution: "webidl-conversions@npm:5.0.0"
+  checksum: ccf1ec2ca7c0b5671e5440ace4a66806ae09c49016ab821481bec0c05b1b82695082dc0a27d1fe9d804d475a408ba0c691e6803fd21be608e710955d4589cd69
+  languageName: node
+  linkType: hard
+
 "whatwg-fetch@npm:^3.0.0":
   version: 3.6.19
   resolution: "whatwg-fetch@npm:3.6.19"
   checksum: 2896bc9ca867ea514392c73e2a272f65d5c4916248fe0837a9df5b1b92f247047bc76cf7c29c28a01ac6c5fb4314021d2718958c8a08292a96d56f72b2f56806
+  languageName: node
+  linkType: hard
+
+"whatwg-url-without-unicode@npm:8.0.0-3":
+  version: 8.0.0-3
+  resolution: "whatwg-url-without-unicode@npm:8.0.0-3"
+  dependencies:
+    buffer: ^5.4.3
+    punycode: ^2.1.1
+    webidl-conversions: ^5.0.0
+  checksum: 1fe266f7161e0bd961087c1254a5a59d1138c3d402064495eed65e7590d9caed5a1d9acfd6e7a1b0bf0431253b0e637ee3e4ffc08387cd60e0b2ddb9d4687a4b
   languageName: node
   linkType: hard
 
