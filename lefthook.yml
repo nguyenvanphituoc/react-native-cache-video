@@ -1,3 +1,8 @@
+# You can choose whatever name you want.
+# You can share it between projects where you use lefthook.
+# Make sure the path is absolute.
+rc: ~/.lefthookrc
+
 pre-commit:
   parallel: true
   commands:
