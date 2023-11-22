@@ -4,8 +4,8 @@ import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.Promise;
 
-abstract class CacheVideoSpec extends ReactContextBaseJavaModule {
-  CacheVideoSpec(ReactApplicationContext context) {
+abstract class CacheVideoHttpProxySpec extends ReactContextBaseJavaModule {
+  CacheVideoHttpProxySpec(ReactApplicationContext context) {
     super(context);
   }
 

@@ -1,5 +1,7 @@
 package com.cachevideo;
 
+import android.util.Log;
+
 import androidx.annotation.Nullable;
 
 import com.facebook.react.bridge.NativeModule;
@@ -11,13 +13,14 @@ import com.facebook.react.TurboReactPackage;
 import java.util.HashMap;
 import java.util.Map;
 
-public class CacheVideoPackage extends TurboReactPackage {
+public class CacheVideoHttpProxyPackage extends TurboReactPackage {
 
   @Nullable
   @Override
   public NativeModule getModule(String name, ReactApplicationContext reactContext) {
-    if (name.equals(CacheVideoModule.NAME)) {
-      return new CacheVideoModule(reactContext);
+    if (name.equals(CacheVideoHttpProxyModule.NAME)) {
+      Log.d(CacheVideoHttpProxyModule.NAME, reactContext.toString());
+      return new CacheVideoHttpProxyModule(reactContext);
     } else {
       return null;
     }
@@ -29,10 +32,10 @@ public class CacheVideoPackage extends TurboReactPackage {
       final Map<String, ReactModuleInfo> moduleInfos = new HashMap<>();
       boolean isTurboModule = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED;
       moduleInfos.put(
-              CacheVideoModule.NAME,
+              CacheVideoHttpProxyModule.NAME,
               new ReactModuleInfo(
-                      CacheVideoModule.NAME,
-                      CacheVideoModule.NAME,
+                      CacheVideoHttpProxyModule.NAME,
+                      CacheVideoHttpProxyModule.NAME,
                       false, // canOverrideExistingModule
                       false, // needsEagerInit
                       true, // hasConstants
