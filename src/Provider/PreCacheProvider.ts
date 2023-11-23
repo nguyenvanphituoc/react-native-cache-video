@@ -210,8 +210,8 @@ export class PreCacheProvider implements PreCacheInterface {
           this.cacheFolder
         );
         // ignore segment cache file response
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const resolutionPlaylist = await this.prepareSourceStream(playlist);
+        // const resolutionPlaylist =
+        await this.prepareSourceStream(playlist);
       } else if (firstSegment) {
         // ignore all media sequence cache file response
         const allMediaSequence = newTextData
@@ -221,8 +221,8 @@ export class PreCacheProvider implements PreCacheInterface {
               `${scheme}//${host}${pathReplaceLast(originURL.href, line)}`
           );
 
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const segments = await Promise.all(
+        // const segments =
+        await Promise.all(
           allMediaSequence.map((sequenceUrl) =>
             this.prepareSourceStream(sequenceUrl)
           )

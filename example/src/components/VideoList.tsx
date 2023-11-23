@@ -17,7 +17,7 @@ export default function VideoList() {
       style={{ flex: 1 }}
       pagingEnabled
       keyExtractor={(item) => item.title}
-      getItemLayout={(data, index) => ({
+      getItemLayout={(_data, index) => ({
         length: dimension.height,
         offset: dimension.height * index,
         index,

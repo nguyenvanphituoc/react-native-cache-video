@@ -1,10 +1,9 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 import * as React from 'react';
 
 import {
   CacheManagerProvider,
   FreePolicy,
-  LFUPolicy,
+  // LFUPolicy,
 } from 'react-native-cache-video';
 import ListVideo from './components/VideoList';
 

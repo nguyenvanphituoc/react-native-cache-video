@@ -1,10 +1,9 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
 import type {
   MemoryCacheDelegate,
   MemoryCachePolicyInterface,
 } from '../../types/type';
 /**
- * 
+ *
 - LRU (Least Recently Used): The least recently used item is evicted. This policy is often used to keep recently accessed items in the cache.
 - LFU (Least Frequently Used): The least frequently used item is evicted. This policy is based on the number of accesses to each item.
 - FIFO (First-In-First-Out): The first item added to the cache is the first one to be evicted. This is a straightforward and easy-to-implement policy.
@@ -19,13 +18,13 @@ export class FreePolicy implements MemoryCachePolicyInterface {
     this.onEvict.bind(this);
   }
 
-  onAccess(cache: Map<string, any>, key: string) {}
+  onAccess(_cache: Map<string, any>, _key: string) {}
 
-  onEvict(cache: Map<string, any>, delegate?: MemoryCacheDelegate<any>) {}
+  onEvict(_cache: Map<string, any>, _delegate?: MemoryCacheDelegate<any>) {}
   //
   get dataSource(): { [key in string]: number } {
     return {};
   }
 
-  set dataSource(data: { [key in string]: number }) {}
+  set dataSource(_data: { [key in string]: number }) {}
 }
