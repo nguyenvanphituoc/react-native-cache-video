@@ -4,8 +4,16 @@ Support cache video type when playing in Video component
 
 ## Installation
 
+with npm
+
 ```sh
-npm install react-native-cache-video
+npm install react-native-blob-util react-native-url-polyfill react-native-cache-video
+```
+
+with yarn
+
+```sh
+yarn add react-native-blob-util react-native-url-polyfill react-native-cache-video
 ```
 
 ## Usage
