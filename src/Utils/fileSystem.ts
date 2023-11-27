@@ -1,17 +1,17 @@
 import RNFetchBlob from 'react-native-blob-util';
-import { getExtensionIfNeed } from '../Utils/util';
+import { getExtensionIfNeed } from './util';
 
 import type { Encoding } from 'react-native-blob-util';
 
 // RNFS
-const FileSystemManager = RNFetchBlob.fs;
+const FSManager = RNFetchBlob.fs;
 //
 export enum FileBucket {
   cache = 'react-native-cache-video/',
 }
 
-export class SimpleFileProvider {
-  private static _instance: SimpleFileProvider;
+export class FileSystemManager {
+  private static _instance: FileSystemManager;
 
   // support only one track
   constructor() {
@@ -38,8 +38,8 @@ export class SimpleFileProvider {
   }
 
   getBucketFolder(bucket?: FileBucket) {
-    let cacheFolder = FileSystemManager.dirs.CacheDir;
-    let documentFolder = FileSystemManager.dirs.DocumentDir;
+    let cacheFolder = FSManager.dirs.CacheDir;
+    let documentFolder = FSManager.dirs.DocumentDir;
     let delimiter = '/';
 
     // if (tempFolder[tempFolder.length - 1] !== delimiter) {
@@ -78,16 +78,16 @@ export class SimpleFileProvider {
 
   async configuration() {
     this.forEachBucket(async (directory) => {
-      const existed = await FileSystemManager.exists(directory);
+      const existed = await FSManager.exists(directory);
       if (!existed) {
-        return FileSystemManager.mkdir(directory);
+        return FSManager.mkdir(directory);
       }
     });
   }
 
   async clearDirectory(bucket: string) {
-    await FileSystemManager.unlink(bucket);
-    await FileSystemManager.mkdir(bucket);
+    await FSManager.unlink(bucket);
+    await FSManager.mkdir(bucket);
   }
 
   async clearBucket(bucket: FileBucket) {
@@ -109,7 +109,7 @@ export class SimpleFileProvider {
       const fileName = `file_${timestamp}.${fileExtension}`;
       const desUrl = `${folderUrl}${fileName}`;
 
-      await FileSystemManager.cp(fromPath, desUrl);
+      await FSManager.cp(fromPath, desUrl);
       await this.unlinkFile(fromPath);
       //
 
@@ -121,16 +121,16 @@ export class SimpleFileProvider {
 
   async unlinkFile(fromPath?: string) {
     if (fromPath) {
-      await FileSystemManager.unlink(fromPath);
+      await FSManager.unlink(fromPath);
     }
   }
 
   async getStatistic(fromUrl?: string) {
     if (fromUrl) {
-      const stat = await FileSystemManager.stat(fromUrl);
+      const stat = await FSManager.stat(fromUrl);
       return stat;
     }
-    return {} as Awaited<ReturnType<typeof FileSystemManager.stat>>;
+    return {} as Awaited<ReturnType<typeof FSManager.stat>>;
   }
 
   async existsFile(forFile: string): Promise<boolean> {
@@ -139,7 +139,7 @@ export class SimpleFileProvider {
     // key format: /cache/prefix-fileName-timestamp.ext
     // code below will check the file exist or not
     try {
-      const stats = await FileSystemManager.stat(forFile);
+      const stats = await FSManager.stat(forFile);
       if (stats.type === 'file') {
         return true;
       }
@@ -162,7 +162,7 @@ export class SimpleFileProvider {
   ): Promise<string> {
     try {
       if (await this.existsFile(resourceURL)) {
-        const content = await FileSystemManager.readFile(resourceURL, format);
+        const content = await FSManager.readFile(resourceURL, format);
         return content;
       }
 
@@ -181,7 +181,7 @@ export class SimpleFileProvider {
     // case 1: file not exist
     // case 2: file exist but overwrite because expired
     try {
-      await FileSystemManager.writeFile(resourceURL, content, format);
+      await FSManager.writeFile(resourceURL, content, format);
     } catch (error) {
       throw error;
     }

@@ -4,8 +4,8 @@ import RNModule from 'react-native';
 import { CacheManager } from '../ProxyCacheManager';
 import { useIsForeground } from './useIsForeground';
 import { HLS_CACHING_RESTART } from '../Utils/constants';
-import { LFUPolicy } from '../Provider';
 import type { MemoryCachePolicyInterface } from '../../types/type';
+import { portGenerate } from '../Utils/util';
 
 //
 /**
@@ -15,62 +15,72 @@ import type { MemoryCachePolicyInterface } from '../../types/type';
  *  Note: passing undefined as a Provider value does not cause consuming components to use defaultValue.
  * "
  */
-export const CacheManagerContext = createContext<CacheManager>(
-  new CacheManager('react-native-cache-video', __DEV__)
-);
+export const CacheManagerContext = createContext<{
+  cacheManager: CacheManager;
+}>({
+  cacheManager: new CacheManager('react-native-cache-video', __DEV__),
+});
 CacheManagerContext.displayName = Symbol('CacheManagerContext').toString();
 
-export const lfuPolicy = new LFUPolicy();
-
 export const CacheManagerProvider = ({
-  capacity,
-  cachePolicy = lfuPolicy,
+  cachePolicy,
+  devMode = true,
   children,
 }: {
-  capacity?: number;
   cachePolicy?: MemoryCachePolicyInterface;
+  devMode?: boolean;
   children: any;
 }) => {
   const cacheManager = useRef<CacheManager>(
-    new CacheManager('react-native-cache-video', __DEV__)
+    new CacheManager('react-native-cache-video', devMode)
   );
   //
   const isForeground = useIsForeground();
   //
-  const notifyEvent = useCallback(() => {
-    RNModule.DeviceEventEmitter.emit(HLS_CACHING_RESTART, {});
+  // we dont use state here because we dont want to re-render the component
+  // you should listen HLS_CACHING_RESTART event to get the running port
+  const notifyEvent = useCallback((runningPort: number) => {
+    RNModule.DeviceEventEmitter.emit(HLS_CACHING_RESTART, runningPort);
   }, []);
 
   useEffect(() => {
     const server = cacheManager.current;
-
-    if (capacity) {
-      server.enableMemoryCache(capacity, cachePolicy);
+    if (cachePolicy) {
+      server.enableMemoryCache(cachePolicy);
     }
 
     return () => {
       server.disableMemoryCache();
     };
-  }, [cachePolicy, capacity]);
+  }, [cachePolicy]);
 
   useEffect(() => {
     const server = cacheManager.current;
     if (isForeground) {
-      server.enableBridgeServer();
-      setTimeout(notifyEvent, 1000);
+      const port = portGenerate();
+      server.enableBridgeServer(port);
+      setTimeout(() => notifyEvent(port), 1000);
     } else if (!isForeground) {
       server.disableBridgeServer();
     }
+
+    return () => {
+      server.disableBridgeServer();
+    };
   }, [isForeground, notifyEvent]);
 
   return (
-    <CacheManagerContext.Provider value={cacheManager.current}>
+    <CacheManagerContext.Provider
+      value={{
+        cacheManager: cacheManager.current,
+      }}
+    >
       {children}
     </CacheManagerContext.Provider>
   );
 };
 
-export function useProxyCacheManager(): CacheManager {
+export function useProxyCacheManager() {
   const shared = React.useContext(CacheManagerContext);
 
   return shared;

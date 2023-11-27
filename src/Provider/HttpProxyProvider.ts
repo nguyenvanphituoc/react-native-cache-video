@@ -100,18 +100,16 @@ class Response implements ResponseInterface {
 }
 
 export class BridgeServer implements BridgeServerInterface {
-  port: number;
   serviceName: string;
   isRunning: boolean;
   callbacks: { method: string; url: string; callback: Function }[];
   static server: BridgeServer;
 
-  constructor(serviceName: string, devMode = false) {
+  constructor(serviceName: string, devMode: boolean) {
     if (!serviceName) {
       throw new Error('Invalid service name');
     }
 
-    this.port = 8080;
     this.serviceName = serviceName;
     this.callbacks = [];
     this.isRunning = false;
@@ -128,10 +126,6 @@ export class BridgeServer implements BridgeServerInterface {
     }
 
     BridgeServer.server = this;
-  }
-
-  restart() {
-    this.listen(this.port);
   }
 
   // override all function of BridgeServer
@@ -167,7 +161,6 @@ export class BridgeServer implements BridgeServerInterface {
       );
       return;
     }
-    this.port = port;
     this.isRunning = true;
     if (port < 0 || port > 65535) {
       throw new Error('Invalid port number');

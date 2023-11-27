@@ -16,20 +16,17 @@ import {
   // VIDEO_EXTENSIONS,
 } from './Utils/constants';
 
-import { FileBucket, SimpleFileProvider } from './Provider/FileProvider';
+import { FileBucket, FileSystemManager } from './Utils/fileSystem';
+import { SimpleSessionProvider, type Encoding } from './Utils/session';
 import {
   cacheKey,
   getCacheKey,
   getOriginURL,
-  portGenerate,
+  isHLSUrl,
   reverseProxyPlaylist,
   reverseProxyURL,
 } from './Utils/util';
 
-import {
-  SimpleSessionProvider,
-  type Encoding,
-} from './Provider/SessionProvider';
 import { MemoryCacheProvider } from './Provider/MemoryCacheProvider';
 import { BridgeServer } from './Provider/HttpProxyProvider';
 import { PreCacheProvider } from './Provider/PreCacheProvider';
@@ -39,17 +36,18 @@ export class CacheManager
 {
   //
   private _sessionTask: SessionTaskInterface;
-  private _storage: SimpleFileProvider;
+  private _storage: FileSystemManager;
   private _bridgeServer: BridgeServerInterface;
   private _preCache: PreCacheInterface;
   //
+  private runningPort?: number;
   private _memoryCache?: MemoryCacheInterface<string>;
   //
   constructor(
     serverName: string,
     devMode: boolean,
     _sessionTask: SessionTaskInterface = new SimpleSessionProvider(),
-    _storage = new SimpleFileProvider()
+    _storage = new FileSystemManager()
   ) {
     //
     this._sessionTask = _sessionTask;
@@ -73,7 +71,6 @@ export class CacheManager
     this.saveCacheToStorage = this.saveCacheToStorage.bind(this);
     this.loadCacheFromStorage = this.loadCacheFromStorage.bind(this);
     this.didEvictHandler = this.didEvictHandler.bind(this);
-    this.syncMemoryCache = this.syncMemoryCache.bind(this);
     //
     this.enableBridgeServer = this.enableBridgeServer.bind(this);
     this.disableBridgeServer = this.disableBridgeServer.bind(this);
@@ -107,7 +104,7 @@ export class CacheManager
     return this._storage.getBucketFolder(FileBucket.cache);
   }
   // - MARK: CacheManager section
-  private putCachedFile(forKey: string, folder: string = this.cacheFolder) {
+  private putCachedFile(forKey: string, folder: string) {
     //
     const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
       forKey,
@@ -143,24 +140,21 @@ export class CacheManager
       KEY_PREFIX
     );
     if (await this._storage.existsFile(cacheKeyStr)) {
-      this.syncMemoryCache(originURL.href, cacheKeyStr);
+      this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
       this.getCachedFile(originURL.href);
       return cacheKeyStr;
     }
     // remove reference if need
-    this.syncMemoryCache(originURL.href);
+    this._memoryCache?.syncCache(originURL.href);
 
     return undefined;
   }
   // END: CacheManager section
 
   // - MARK: MemoryCache section
-  enableMemoryCache(capacity: number, cachePolicy: MemoryCachePolicyInterface) {
+  enableMemoryCache(cachePolicy: MemoryCachePolicyInterface) {
     if (!this._memoryCache) {
-      this._memoryCache = new MemoryCacheProvider<string>(
-        capacity,
-        cachePolicy
-      );
+      this._memoryCache = new MemoryCacheProvider<string>(cachePolicy);
       this._memoryCache.delegate = this;
       this.loadCacheFromStorage();
     }
@@ -174,7 +168,7 @@ export class CacheManager
   }
 
   async didEvictHandler(key: string, filePath?: string) {
-    if (key.endsWith('.m3u8')) {
+    if (isHLSUrl(key)) {
       // TODO:
     } else if (key && filePath) {
       await this._storage.unlinkFile(filePath);
@@ -212,9 +206,6 @@ export class CacheManager
     return Promise.resolve();
   }
 
-  private syncMemoryCache(key: string, value?: string) {
-    this._memoryCache?.syncCache(key, value);
-  }
   // END: MemoryCache section
 
   // - MARK: PreCache section
@@ -239,7 +230,7 @@ export class CacheManager
       // this fetch from exist check
       // silently save to cache
       // because it pre-cache
-      this.syncMemoryCache(originURL.href, cacheKeyStr);
+      this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
     } else {
       // this download and need manually save
       // new file downloaded
@@ -247,7 +238,7 @@ export class CacheManager
         await this._storage.write(cacheKeyStr, data);
       }
 
-      this.putCachedFile(forUrl);
+      this.putCachedFile(forUrl, this.cacheFolder);
     }
   }
 
@@ -261,14 +252,18 @@ export class CacheManager
   // END: PreCacheDelegate
 
   // - MARK: BridgeServer
-  enableBridgeServer(port = portGenerate()) {
+  enableBridgeServer(port: number) {
     //
+    this.runningPort = port;
     this._bridgeServer.listen(port);
+    //
+    this.addRequestHandlers();
     //
     this.loadCacheFromStorage();
   }
 
   disableBridgeServer() {
+    this.runningPort = undefined;
     this._bridgeServer?.stop();
     //
     this._preCache?.cancelCachingList();
@@ -277,33 +272,30 @@ export class CacheManager
   }
 
   reverseProxyURL(forUrl: string) {
-    if (!forUrl.startsWith('http') || !this._bridgeServer?.port) {
+    if (!forUrl.startsWith('http') || !this.runningPort || !isHLSUrl(forUrl)) {
       console.warn(
         'reverseProxyURL: invalid url or port. Should check if bridge server is running and url is CDN url start with http'
       );
       return forUrl;
     }
-
-    return reverseProxyURL(forUrl, this._bridgeServer?.port);
+    return reverseProxyURL(forUrl, this.runningPort);
   }
 
   private addRequestHandlers() {
     this._bridgeServer &&
       this._bridgeServer.get('*', async (req, res) => {
-        const urlStr = getOriginURL(req.url, this._bridgeServer!.port);
+        const urlStr = getOriginURL(req.url, this.runningPort!);
+        // console.log('====== addRequestHandlers: ', req.url, urlStr);
         let filePath = cacheKey(urlStr ?? '', this.cacheFolder, KEY_PREFIX);
-
         if (!urlStr) {
           return res.send(400, 'text/plain', 'Bad Request');
         }
         //
-        if (urlStr.endsWith('.m3u8')) {
+        if (isHLSUrl(urlStr)) {
           this.addPlaylistHandler(urlStr, filePath, res);
           //
-        } else if (urlStr.endsWith('.ts')) {
-          this.addSegmentHandler(urlStr, filePath, res);
         } else {
-          return res.send(415, 'text/plain', 'Unsupported Media Type');
+          this.addSegmentHandler(urlStr, filePath, res);
         }
       });
   }
@@ -314,23 +306,25 @@ export class CacheManager
     reverseRes: ResponseInterface
   ) {
     try {
-      const port = this._bridgeServer!.port;
+      const port = this.runningPort!;
       //
-      if (this._memoryCache?.has(forUrl)) {
-        // make playlist
-        let playlistStr = reverseProxyPlaylist(
-          this.getCachedFile(forUrl)!,
-          forUrl,
-          port
-        );
-        return reverseRes.send(200, HLS_CONTENT_TYPE, playlistStr);
-      }
+      // if (this._memoryCache?.has(forUrl)) {
+      //   // make playlist
+      //   let playlistStr = reverseProxyPlaylist(
+      //     this.getCachedFile(forUrl)!,
+      //     forUrl,
+      //     port
+      //   );
+      //   return reverseRes.send(200, HLS_CONTENT_TYPE, playlistStr);
+      // }
 
       const cachedData = await this._storage.read(filePath);
+      let playlistStr = '';
 
       if (cachedData) {
-        let playlistStr = reverseProxyPlaylist(cachedData, forUrl, port);
-        this.syncMemoryCache(forUrl, cachedData);
+        playlistStr = reverseProxyPlaylist(cachedData, forUrl, port);
+        // get
+        // this._memoryCache?.syncCache(forUrl, filePath);
         return reverseRes.send(200, HLS_CONTENT_TYPE, playlistStr);
       }
 
@@ -347,13 +341,15 @@ export class CacheManager
         );
       }
 
-      this.syncMemoryCache(forUrl, data);
+      playlistStr = reverseProxyPlaylist(data, forUrl, port);
       reverseRes.send(
         response.respInfo.status,
         response.respInfo.headers['Content-Type'],
-        reverseProxyPlaylist(data, forUrl, port)
+        playlistStr
       );
 
+      // put new file playlist to cache
+      // this._memoryCache?.syncCache(forUrl, filePath);
       this._storage.write(filePath, data);
     } catch (error) {
       throw error;
@@ -366,10 +362,6 @@ export class CacheManager
     reverseRes: ResponseInterface
   ) {
     try {
-      if (this._memoryCache?.has(forUrl)) {
-        // TODO:
-      }
-
       const cachedData = await this._storage.read(filePath);
 
       if (cachedData) {

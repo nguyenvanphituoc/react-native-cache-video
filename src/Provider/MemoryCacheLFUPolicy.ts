@@ -10,7 +10,7 @@ import {
   mergeWithCustomCondition,
 } from '../Utils/util';
 /**
- * 
+ *
 - LRU (Least Recently Used): The least recently used item is evicted. This policy is often used to keep recently accessed items in the cache.
 - LFU (Least Frequently Used): The least frequently used item is evicted. This policy is based on the number of accesses to each item.
 - FIFO (First-In-First-Out): The first item added to the cache is the first one to be evicted. This is a straightforward and easy-to-implement policy.
@@ -21,10 +21,13 @@ import {
 // LFU (Least Frequently Used) replacement policy
 export class LFUPolicy implements MemoryCachePolicyInterface {
   private referenceBit: { [key in string]: number };
-  constructor() {
+  private capacity: number;
+
+  constructor(capacity: number) {
     this.referenceBit = {} as {
       [key in string]: number;
     };
+    this.capacity = capacity;
 
     this.onAccess.bind(this);
     this.onEvict.bind(this);
@@ -46,6 +49,10 @@ export class LFUPolicy implements MemoryCachePolicyInterface {
   }
 
   onEvict(cache: Map<string, any>, delegate?: MemoryCacheDelegate<any>) {
+    if (cache.size < this.capacity) {
+      return;
+    }
+
     // Evict the item with the lowest access frequency
     let minFreq = Number.MAX_VALUE;
     let lfuKey: string | null = null;

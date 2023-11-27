@@ -1,6 +1,10 @@
 import * as React from 'react';
-import { Image } from 'react-native';
-import { useAsyncCache, useIsForeground } from 'react-native-cache-video';
+import { DeviceEventEmitter, Image } from 'react-native';
+import {
+  HLS_CACHING_RESTART,
+  useAsyncCache,
+  useIsForeground,
+} from 'react-native-cache-video';
 import Video from 'react-native-video';
 
 function Component({ uri, thumb }: { uri: string; thumb: string }) {
@@ -8,11 +12,17 @@ function Component({ uri, thumb }: { uri: string; thumb: string }) {
   const isForeground = useIsForeground();
 
   React.useEffect(() => {
-    setVideoPlayUrlBy(uri);
-    // setVideoPlayUrlBy(
-    //   'http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
-    // );
-  }, [setVideoPlayUrlBy, uri]);
+    const listener = DeviceEventEmitter.addListener(HLS_CACHING_RESTART, () => {
+      setVideoPlayUrlBy(uri);
+      // setVideoPlayUrlBy(
+      //   'http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4'
+      // );
+    });
+
+    return () => {
+      listener.remove();
+    };
+  }, [setVideoPlayUrlBy, uri, cachedVideoUrl]);
 
   return cachedVideoUrl ? (
     <Video

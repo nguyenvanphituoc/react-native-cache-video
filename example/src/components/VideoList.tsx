@@ -1,7 +1,8 @@
 import React, { useRef } from 'react';
 import { FlatList, Text, Dimensions, View } from 'react-native';
 import VideoItem from './VideoItem'; // Assuming VideoItem is in the same directory
-import { mediaJSON } from '../data/videos';
+// import { mediaJSON } from '../data/videos';
+import { mediaJSON } from '../data/streams';
 
 const dimension = Dimensions.get('window');
 
@@ -33,6 +34,7 @@ export default function VideoList() {
           currentDisplayIndex.current = pageIndex;
           videoRefs.current[prevIndex]?.setDisplay(false);
         }
+        // preparing for list
       }}
       renderItem={({ item, index }) => (
         <View style={{ flex: 1, height: dimension.height }}>

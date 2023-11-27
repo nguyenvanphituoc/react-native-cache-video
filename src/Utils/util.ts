@@ -1,5 +1,11 @@
 import { URL, URLSearchParams } from 'react-native-url-polyfill';
-import { LOCALHOST, MAX_PORT, MIN_PORT, QUERY_ORIGIN_PATH } from './constants';
+import {
+  LOCALHOST,
+  MAX_PORT,
+  MIN_PORT,
+  QUERY_ORIGIN_PATH,
+  VIDEO_EXTENSIONS,
+} from './constants';
 
 //
 export const isNull = (data: any) => {
@@ -32,16 +38,134 @@ export const getExtensionIfNeed = (
 
   return '';
 };
-// MARK: - Utils
-export function hashFileName(fileName: string) {
-  let hash = 0;
-  for (let i = 0; i < fileName.length; i++) {
-    // eslint-disable-next-line no-bitwise
-    hash = (hash << 5) - hash + fileName.charCodeAt(i);
-    // eslint-disable-next-line no-bitwise
-    hash |= 0; // Convert to 32bit integer
+// MD5 - start
+/**
+function md5cycle(x: number[], k: number[]) {
+  var a = x[0]!,
+    b = x[1]!,
+    c = x[2]!,
+    d = x[3]!;
+
+  a = ff(a, b, c, d, k[0]!, 7, -680876936);
+  d = ff(d, a, b, c, k[1]!, 12, -389564586);
+  c = ff(c, d, a, b, k[2]!, 17, 606105819);
+  b = ff(b, c, d, a, k[3]!, 22, -1044525330);
+  // ... More operations ...
+
+  x[0] = add32(a, x[0]!);
+  x[1] = add32(b, x[1]!);
+  x[2] = add32(c, x[2]!);
+  x[3] = add32(d, x[3]!);
+}
+
+function md5blk(s: string) {
+  var md5blks = [],
+    i; // array of 16x 32-bit integers
+
+  for (i = 0; i < 64; i += 4) {
+    md5blks[i >> 2] =
+      s.charCodeAt(i) +
+      (s.charCodeAt(i + 1) << 8) +
+      (s.charCodeAt(i + 2) << 16) +
+      (s.charCodeAt(i + 3) << 24);
   }
-  return Math.abs(hash).toString(16).toUpperCase();
+  return md5blks;
+}
+
+function cmn(q: number, a: number, b: number, x: number, s: number, t: number) {
+  a = add32(add32(a, q), add32(x, t));
+  return add32((a << s) | (a >>> (32 - s)), b);
+}
+
+function ff(
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  x: number,
+  s: number,
+  t: number
+) {
+  return cmn((b & c) | (~b & d), a, b, x, s, t);
+}
+
+function add32(x: number, y: number) {
+  return (x + y) & 0xffffffff;
+}
+
+function md5(str: string) {
+  var n = str.length,
+    state = [1732584193, -271733879, -1732584194, 271733878],
+    i;
+  for (i = 64; i <= str.length; i += 64) {
+    md5cycle(state, md5blk(str.substring(i - 64, i)));
+  }
+  str = str.substring(i - 64);
+  var tail = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  for (i = 0; i < str.length; i++)
+    tail[i >> 2] |= str.charCodeAt(i) << (i % 4 << 3);
+  tail[i >> 2] |= 0x80 << (i % 4 << 3);
+  if (i > 55) {
+    md5cycle(state, tail);
+    for (i = 0; i < 16; i++) tail[i] = 0;
+  }
+
+  tail[14] = n * 8;
+  md5cycle(state, tail);
+  return state;
+}
+//
+function rhex(n: number) {
+  var hex_chr = '0123456789abcdef'.split('');
+  var s = '',
+    j = 0;
+  for (; j < 4; j++)
+    s += hex_chr[(n >> (j * 8 + 4)) & 0x0f]! + hex_chr[(n >> (j * 8)) & 0x0f];
+  return s;
+}
+
+function hex(x: any[]) {
+  for (var i = 0; i < x.length; i++) x[i] = rhex(x[i]!);
+  return x.join('');
+}
+
+export function hashFileName(fileName: string) {
+  return hex(md5(fileName));
+}
+*/
+// MD5 - end
+// MARK: - Utils
+/**
+  If you want to avoid using BigInt,
+  you can use a 32-bit FNV-1a hash algorithm twice,
+  once for the first half of the string and once for the second half.
+  This will give you two 32-bit hashes which you can concatenate to get a 64-bit hash.
+  */
+
+function hash32(str: string) {
+  let h = 2166136261 >>> 0; // offset_basis
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+  }
+  return h >>> 0;
+}
+
+export function hashFileName(fileName: string) {
+  // let hash = 0;
+  // for (let i = 0; i < fileName.length; i++) {
+  //   // eslint-disable-next-line no-bitwise
+  //   hash = (hash << 5) - hash + fileName.charCodeAt(i);
+  //   // eslint-disable-next-line no-bitwise
+  //   hash |= 0; // Convert to 32bit integer
+  // }
+  // return Math.abs(hash).toString(16).toUpperCase();
+  const halfLength = Math.floor(fileName.length / 2);
+  const firstHalf = fileName.slice(0, halfLength);
+  const secondHalf = fileName.slice(halfLength);
+  const firstHash = hash32(firstHalf).toString(16).padStart(8, '0');
+  const secondHash = hash32(secondHalf).toString(16).padStart(8, '0');
+  return (firstHash + secondHash).toUpperCase();
 }
 
 export function cacheKey(
@@ -103,11 +227,11 @@ export function reverseProxyURL(reqUrl: string, port: number): string {
     return '';
   }
 
-  const components = new URLSearchParams(reqUrl);
+  const components = new URLSearchParams();
   components.set(QUERY_ORIGIN_PATH, reqUrl);
 
-  const lastPath = getLastPath(reqUrl);
-  const url = new URL(`${LOCALHOST}:${port}/${lastPath}`);
+  const lastPath = new URL(reqUrl).pathname;
+  const url = new URL(`${LOCALHOST}:${port}${lastPath}`);
   url.search = components.toString();
 
   return url.href;
@@ -131,9 +255,10 @@ export function reverseProxyPlaylist(
   reqUrl: string,
   port: number
 ) {
+  const Buffer = require('buffer').Buffer;
   try {
-    const newTextData = Buffer.from(data, 'base64')
-      .toString('utf8')
+    const dataStr = Buffer.from(data, 'base64').toString('utf8');
+    const newTextData = dataStr
       .split('\n')
       .map((line: string) => {
         const result = processPlaylistLine(line, reqUrl, port);
@@ -141,7 +266,12 @@ export function reverseProxyPlaylist(
       })
       .join('\n');
 
-    return Buffer.from(newTextData, 'utf8').toString('base64');
+    const playlistStr = Buffer.from(newTextData, 'utf8');
+    // console.log('====== request url: ', reqUrl);
+    // console.log('====== addPlaylistHandler base data: ', dataStr);
+    // console.log('====== addPlaylistHandler convert data: ', newTextData);
+    // console.log('====== ====== ======');
+    return playlistStr.toString('base64');
   } catch (error) {
     throw error;
   }
@@ -152,7 +282,7 @@ export function processPlaylistLine(
   reqUrl: string,
   port: number
 ): string {
-  if (!line) {
+  if (isNull(line)) {
     return line;
   }
 
@@ -161,11 +291,6 @@ export function processPlaylistLine(
   }
 
   const originalSegmentURL = absoluteURL(line, reqUrl);
-
-  if (!originalSegmentURL) {
-    return line;
-  }
-
   const reverseProxyURLObj = reverseProxyURL(originalSegmentURL, port);
 
   if (reverseProxyURLObj) {
@@ -190,13 +315,11 @@ export function lineByReplacingURI(
   if (!uri) {
     return line;
   }
-
+  // convert from relative path to absolute path
+  // example: /hls/playlist.m3u8 -> scheme://host/hls/playlist.m3u8
   const originalSegmentURL = absoluteURL(uri, reqUrl);
-
-  if (!originalSegmentURL) {
-    return line;
-  }
-
+  // convert from absolute path to reverse proxy path
+  // example: scheme://host/hls/playlist.m3u8 -> localhost:port/hls/playlist.m3u8
   const reverseProxyURLObj = reverseProxyURL(originalSegmentURL, port);
 
   if (!reverseProxyURLObj) {
@@ -211,11 +334,7 @@ export function lineByReplacingURI(
   );
 }
 
-export function absoluteURL(line: string, reqUrl: string): string | null {
-  if (!['m3u8', 'ts'].includes(getExtensionIfNeed(reqUrl))) {
-    return null;
-  }
-
+export function absoluteURL(line: string, reqUrl: string): string {
   if (line.startsWith('http://') || line.startsWith('https://')) {
     return line;
   }
@@ -225,7 +344,7 @@ export function absoluteURL(line: string, reqUrl: string): string | null {
   const host = originUrl.host;
 
   if (!scheme || !host) {
-    return null;
+    return line;
   }
 
   let path: string;
@@ -258,3 +377,21 @@ export function mergeWithCustomCondition(
 
   return result;
 }
+
+export const isMediaUrl = (url: string) => {
+  const urlObj = new URL(url);
+  const pathName = urlObj.pathname;
+
+  const fileExt = getExtensionIfNeed(pathName);
+
+  return VIDEO_EXTENSIONS.some((ext) => ext.includes(fileExt.toLowerCase()));
+};
+
+export const isHLSUrl = (url: string) => {
+  const urlObj = new URL(url);
+  const pathName = urlObj.pathname;
+
+  const fileExt = getExtensionIfNeed(pathName);
+
+  return fileExt.toLowerCase() === 'm3u8';
+};

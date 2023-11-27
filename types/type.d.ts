@@ -28,7 +28,6 @@ export interface HttpServer {
 }
 
 export interface BridgeServerInterface {
-  port: number;
   serviceName: string;
   get: (url: string, callback: CallBackHandler) => void;
   post: (url: string, callback: CallBackHandler) => void;
@@ -37,7 +36,6 @@ export interface BridgeServerInterface {
   patch: (url: string, callback: CallBackHandler) => void;
   use: (callback: CallBackHandler) => void;
   listen: (port: number) => void;
-  restart: () => void;
   stop: () => void;
 }
 //

@@ -14,14 +14,12 @@ import { SECOND_CHANCE_TO_COUNT } from '../Utils/constants';
 // you will remove page 1 so it will cause bad performance for user experience,
 
 export class MemoryCacheProvider<V> implements MemoryCacheInterface<V> {
-  private capacity: number;
   private cache: Map<string, V>;
   //
   cachePolicy: MemoryCachePolicyInterface;
   delegate: MemoryCacheDelegate<V> | undefined;
 
-  constructor(capacity: number, cachePolicy: MemoryCachePolicyInterface) {
-    this.capacity = capacity;
+  constructor(cachePolicy: MemoryCachePolicyInterface) {
     this.cache = new Map<string, V>();
     this.cachePolicy = cachePolicy;
   }
@@ -41,7 +39,7 @@ export class MemoryCacheProvider<V> implements MemoryCacheInterface<V> {
     if (this.has(key)) {
       // this will mix LRU and LFU
       this.cache.delete(key);
-    } else if (this.cache.size >= this.capacity) {
+    } else {
       // set for new key only, give it a chance to be counted
       this.cachePolicy.dataSource[key] = SECOND_CHANCE_TO_COUNT;
       // If the cache is full, apply the replacement policy to evict an item

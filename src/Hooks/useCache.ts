@@ -1,13 +1,14 @@
 import { useCallback, useRef, useState } from 'react';
 
 import { THRESH_HOLD_TIMEOUT } from '../Utils/constants';
+import { isHLSUrl } from '../Utils/util';
 import { useProxyCacheManager } from './useProxyCacheProvider';
 
 export const useAsyncCache = () => {
   const currentVideoUrl = useRef<string | undefined>(undefined);
   const [cachedVideoUrl, setVideoUrl] = useState<string | undefined>(undefined);
   //
-  const cacheManager = useProxyCacheManager();
+  const { cacheManager } = useProxyCacheManager();
 
   const delayUpdateVideo = useCallback(
     (videoFile?: string) =>
@@ -27,7 +28,7 @@ export const useAsyncCache = () => {
     async (newUrl: string | undefined) => {
       // in case onLayout call multiple times
       if (newUrl && cacheManager) {
-        const isStream: boolean = newUrl.endsWith('.m3u8');
+        const isStream: boolean = isHLSUrl(newUrl);
 
         // always loading from reverse proxy for stream link
         if (isStream) {
@@ -48,7 +49,6 @@ export const useAsyncCache = () => {
         }
 
         // try load from CDN
-        // TODO: better caching same time with proxy
         delayUpdateVideo(newUrl);
         // and cache it the same time
         cacheManager.preCacheFor(newUrl).then(cacheManager.getCachedFile);

@@ -3,15 +3,16 @@ import type {
   PreCacheInterface,
   SessionTaskInterface,
 } from '../../types/type';
+import { KEY_PREFIX, SIGNAL_NOT_DOWNLOAD_ACTION } from '../Utils/constants';
 import {
-  KEY_PREFIX,
-  SIGNAL_NOT_DOWNLOAD_ACTION,
-  VIDEO_EXTENSIONS,
-} from '../Utils/constants';
-import { cacheKey, getCacheKey, pathReplaceLast } from '../Utils/util';
+  cacheKey,
+  getCacheKey,
+  isHLSUrl,
+  isMediaUrl,
+  pathReplaceLast,
+} from '../Utils/util';
 
-import type { FetchBlobResponse, StatefulPromise } from './SessionProvider';
-import { SimpleSessionProvider } from './SessionProvider';
+import type { FetchBlobResponse, StatefulPromise } from '../Utils/session';
 
 export class PreCacheProvider implements PreCacheInterface {
   private isRunningThread = false;
@@ -28,10 +29,7 @@ export class PreCacheProvider implements PreCacheInterface {
   sessionTask: SessionTaskInterface;
   cacheFolder: string;
   //
-  constructor(
-    cacheFolder: string,
-    sessionTask: SessionTaskInterface = new SimpleSessionProvider()
-  ) {
+  constructor(cacheFolder: string, sessionTask: SessionTaskInterface) {
     this.sessionTask = sessionTask;
     this.cacheFolder = cacheFolder;
     //
@@ -70,7 +68,7 @@ export class PreCacheProvider implements PreCacheInterface {
           this.cacheFolder
         );
         // get first segment of playlist if need
-        if (originURL.href.endsWith('.m3u8')) {
+        if (isHLSUrl(urlStr)) {
           // TODO:
         }
         // continue if the file already exists
@@ -122,12 +120,16 @@ export class PreCacheProvider implements PreCacheInterface {
 
   async preCacheFor(url: string): Promise<string> {
     // detect stream or not
-    if (url.endsWith('.m3u8') === true || url.endsWith('.ts') === true) {
-      return this.prepareSourceStream(url);
-    } else if (VIDEO_EXTENSIONS.some((ext) => url.endsWith(ext))) {
+    if (isHLSUrl(url)) {
+      // return this.prepareSourceStream(url);
+      console.warn(
+        'react-native-cache-video does not support pre stream caching'
+      );
+      return url;
+    } else if (isMediaUrl(url)) {
       return this.prepareSourceMedia(url);
     } else {
-      return '';
+      return url;
     }
   }
 
@@ -167,7 +169,11 @@ export class PreCacheProvider implements PreCacheInterface {
     return Promise.resolve();
   }
 
+  /**
+   * @deprecated The method should not be used
+   */
   private async prepareSourceStream(url: string): Promise<string> {
+    const Buffer = require('buffer').Buffer;
     const { originURL, cacheKey: prepareCacheKey } = getCacheKey(
       url,
       this.cacheFolder,
@@ -184,7 +190,7 @@ export class PreCacheProvider implements PreCacheInterface {
       // mark it as downloading
       this.cachingUrl[originURL.href] = httpRequest;
       const { data } = await httpRequest;
-      const newTextData = Buffer.from(data, 'base64')
+      const newTextData: string[] = Buffer.from(data, 'base64')
         .toString('utf8')
         .split('\n');
 
@@ -263,17 +269,14 @@ export class PreCacheProvider implements PreCacheInterface {
       // mark it as downloading
       this.cachingUrl[originURL.href] = httpRequest;
 
-      const response = await httpRequest;
+      // update to cached list
+      this.delegate?.onCachingPlaylistSource(
+        originURL.href,
+        null,
+        this.cacheFolder
+      );
 
-      if (response) {
-        // manually write
-        // update to cached list
-        this.delegate?.onCachingPlaylistSource(
-          originURL.href,
-          null,
-          this.cacheFolder
-        );
-      }
+      await httpRequest;
 
       if (this.errorCachingList[originURL.href]) {
         delete this.errorCachingList[originURL.href];

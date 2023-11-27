@@ -9,7 +9,7 @@ export const KEY_PREFIX = 'react-native-cache-video';
 // application/vnd.apple.mpegurl
 export const HLS_CONTENT_TYPE = 'application/x-mpegurl';
 export const HLS_VIDEO_TYPE = 'video/MP2T';
-export const HLS_CACHING_RESTART = 'HLS_CACHING_RESTART';
+export const HLS_CACHING_RESTART = 'RNCV_HLS_CACHING_RESTART';
 export const QUERY_ORIGIN_PATH = '__hls_origin_url';
 export const LOCALHOST = 'http://127.0.0.1';
 export const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'avi', 'wmv'];
