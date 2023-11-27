@@ -2,6 +2,12 @@
 
 Support cache video type when playing in Video component
 
+- [x] Download and read video/ hls video from cache
+- [x] Cache policy for video for number of video in file system
+- [ ] Cache policy for hls video
+- [ ] Byte-Range Support for Segments
+- [ ] Pre caching for list/ while scrolling
+
 ## Installation
 
 with npm
@@ -88,14 +94,6 @@ sequenceDiagram
 ## Contributing
 
 See the [contributing guide](CONTRIBUTING.md) to learn how to contribute to the repository and the development workflow.
-
-## Support Features
-
-- [x] Download and read video/ hls video from cache
-- [x] Cache policy for video for number of video in file system
-- [ ] Cache policy for hls video
-- [ ] Byte-Range Support for Segments
-- [ ] Pre caching for list/ while scrolling
 
 ## Known Bugs and Future Fixes
 
