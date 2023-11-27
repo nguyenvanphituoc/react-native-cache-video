@@ -1,6 +1,6 @@
 {
   "name": "react-native-cache-video",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "support cache video type mp4, mov, hls for cdn-preload-cached video in scrollview, flatlist",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
