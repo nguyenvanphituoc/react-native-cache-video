@@ -5,6 +5,7 @@ Support cache video type when playing in Video component
 - [x] Download and read video/ hls video from cache
 - [x] Cache policy for video for number of video in file system
 - [ ] Cache policy for hls video
+- [ ] hls caching for dynamic url ( cloudfront)
 - [ ] Byte-Range Support for Segments
 - [ ] Pre caching for list/ while scrolling
 
