@@ -4,7 +4,7 @@ import RNModule from 'react-native';
 import { CacheManager } from '../ProxyCacheManager';
 import { useIsForeground } from './useIsForeground';
 import { HLS_CACHING_RESTART } from '../Utils/constants';
-import type { MemoryCachePolicyInterface } from '../../types/type';
+import type { MemoryCachePolicyInterface } from '../types/type';
 import { portGenerate } from '../Utils/util';
 
 //
@@ -13,7 +13,7 @@ import { portGenerate } from '../Utils/util';
  *  The defaultValue argument is only used when a component does not have a matching Provider above it in the tree.
  *  This can be helpful for testing components in isolation without wrapping them.
  *  Note: passing undefined as a Provider value does not cause consuming components to use defaultValue.
- * "
+ *  "
  */
 export const CacheManagerContext = createContext<{
   cacheManager: CacheManager;

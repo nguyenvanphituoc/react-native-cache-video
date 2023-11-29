@@ -5,7 +5,7 @@ import type {
   RequestInterface,
   ResponseInterface,
   HttpServer,
-} from '../../types/type';
+} from '../types/type';
 
 const LINKING_ERROR =
   `The package 'react-native-cache-video' doesn't seem to be linked. Make sure: \n\n` +

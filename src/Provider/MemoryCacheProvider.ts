@@ -3,7 +3,7 @@ import type {
   MemoryCacheDelegate,
   MemoryCacheInterface,
   MemoryCachePolicyInterface,
-} from '../../types/type';
+} from '../types/type';
 
 import { SECOND_CHANCE_TO_COUNT } from '../Utils/constants';
 

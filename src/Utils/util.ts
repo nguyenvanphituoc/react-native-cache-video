@@ -267,10 +267,7 @@ export function reverseProxyPlaylist(
       .join('\n');
 
     const playlistStr = Buffer.from(newTextData, 'utf8');
-    // console.log('====== request url: ', reqUrl);
-    // console.log('====== addPlaylistHandler base data: ', dataStr);
-    // console.log('====== addPlaylistHandler convert data: ', newTextData);
-    // console.log('====== ====== ======');
+
     return playlistStr.toString('base64');
   } catch (error) {
     throw error;

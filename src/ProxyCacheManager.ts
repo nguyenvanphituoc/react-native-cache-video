@@ -7,9 +7,8 @@ import type {
   ResponseInterface,
   PreCacheInterface,
   MemoryCachePolicyInterface,
-} from '../types/type';
+} from './types/type';
 import {
-  HLS_CONTENT_TYPE,
   HLS_VIDEO_TYPE,
   KEY_PREFIX,
   SIGNAL_NOT_DOWNLOAD_ACTION,
@@ -80,10 +79,6 @@ export class CacheManager
     this.addSegmentHandler = this.addSegmentHandler.bind(this);
     //
   }
-
-  // get preCache() {
-  //   return this._preCache;
-  // }
 
   get sessionTask() {
     return this._sessionTask;
@@ -170,6 +165,7 @@ export class CacheManager
   async didEvictHandler(key: string, filePath?: string) {
     if (isHLSUrl(key)) {
       // TODO:
+      console.warn('didEvictHandler: HLS url not support yet.');
     } else if (key && filePath) {
       await this._storage.unlinkFile(filePath);
     }
@@ -268,13 +264,14 @@ export class CacheManager
     //
     this._preCache?.cancelCachingList();
     this._sessionTask?.cancelAllTask();
+    //
     this.saveCacheToStorage();
   }
 
   reverseProxyURL(forUrl: string) {
     if (!forUrl.startsWith('http') || !this.runningPort || !isHLSUrl(forUrl)) {
       console.warn(
-        'reverseProxyURL: invalid url or port. Should check if bridge server is running and url is CDN url start with http'
+        'reverseProxyURL: invalid url or port.\nShould check if bridge server is running and has been used CDN url start with http protocol.'
       );
       return forUrl;
     }
@@ -302,31 +299,12 @@ export class CacheManager
 
   private async addPlaylistHandler(
     forUrl: string,
-    filePath: string,
+    __filePath: string,
     reverseRes: ResponseInterface
   ) {
     try {
       const port = this.runningPort!;
-      //
-      // if (this._memoryCache?.has(forUrl)) {
-      //   // make playlist
-      //   let playlistStr = reverseProxyPlaylist(
-      //     this.getCachedFile(forUrl)!,
-      //     forUrl,
-      //     port
-      //   );
-      //   return reverseRes.send(200, HLS_CONTENT_TYPE, playlistStr);
-      // }
-
-      const cachedData = await this._storage.read(filePath);
       let playlistStr = '';
-
-      if (cachedData) {
-        playlistStr = reverseProxyPlaylist(cachedData, forUrl, port);
-        // get
-        // this._memoryCache?.syncCache(forUrl, filePath);
-        return reverseRes.send(200, HLS_CONTENT_TYPE, playlistStr);
-      }
 
       const { data, error, ...response } = await this._sessionTask.dataTask(
         forUrl,
@@ -342,15 +320,17 @@ export class CacheManager
       }
 
       playlistStr = reverseProxyPlaylist(data, forUrl, port);
+      this.putCachedFile(forUrl, this.cacheFolder);
+      this.getCachedFile(forUrl);
+      //
       reverseRes.send(
         response.respInfo.status,
         response.respInfo.headers['Content-Type'],
         playlistStr
       );
 
-      // put new file playlist to cache
+      // only put new origin file playlist to cache
       // this._memoryCache?.syncCache(forUrl, filePath);
-      this._storage.write(filePath, data);
     } catch (error) {
       throw error;
     }
@@ -383,24 +363,15 @@ export class CacheManager
 
       // do not need to cache segment data
       // this.syncMemoryCache(forUrl, data);
+      this._storage.write(filePath, data);
+
       reverseRes.send(
         response.respInfo.status,
         response.respInfo.headers['Content-Type'],
         data
       );
-
-      this._storage.write(filePath, data);
     } catch (error) {
       throw error;
     }
   }
-
-  // TODO:
-  // private async addMediaHandler(
-  //   forUrl: string,
-  //   filePath: string,
-  //   reverseRes: ResponseInterface
-  // ) {
-  // }
-  // END: BridgeServer
 }

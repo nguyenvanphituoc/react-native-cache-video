@@ -6,9 +6,7 @@ export const mediaJSON = {
         {
           description:
             "Big Buck Bunny tells the story of a giant rabbit with a heart bigger than himself. When one sunny day three rodents rudely harass him, something snaps... and the rabbit ain't no bunny anymore! In the typical cartoon tradition he prepares the nasty rodents a comical revenge.\n\nLicensed under the Creative Commons Attribution license\nhttp://www.bigbuckbunny.org",
-          sources: [
-            'http://sample.vodobox.net/skate_phantom_flex_4k/skate_phantom_flex_4k.m3u8',
-          ],
+          sources: ['http://content.jwplatform.com/manifests/vM7nH0Kl.m3u8'],
           subtitle: 'By Blender Foundation',
           thumb:
             'https://storage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg',
@@ -16,7 +14,9 @@ export const mediaJSON = {
         },
         {
           description: 'The first Blender Open Movie from 2006',
-          sources: ['http://content.jwplatform.com/manifests/vM7nH0Kl.m3u8'],
+          sources: [
+            'http://sample.vodobox.net/skate_phantom_flex_4k/skate_phantom_flex_4k.m3u8',
+          ],
           subtitle: 'By Blender Foundation',
           thumb:
             'https://storage.googleapis.com/gtv-videos-bucket/sample/images/ElephantsDream.jpg',

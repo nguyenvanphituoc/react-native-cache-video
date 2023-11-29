@@ -2,7 +2,7 @@ import type {
   PreCacheDelegate,
   PreCacheInterface,
   SessionTaskInterface,
-} from '../../types/type';
+} from '../types/type';
 import { KEY_PREFIX, SIGNAL_NOT_DOWNLOAD_ACTION } from '../Utils/constants';
 import {
   cacheKey,

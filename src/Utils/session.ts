@@ -8,7 +8,7 @@ import type {
 import type {
   SessionTaskInterface,
   SessionTaskOptionsType,
-} from '../../types/type';
+} from '../types/type';
 import { KEY_PREFIX } from './constants';
 
 export * from 'react-native-blob-util';

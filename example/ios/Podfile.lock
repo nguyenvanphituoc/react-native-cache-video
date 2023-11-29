@@ -377,7 +377,7 @@ PODS:
     - glog
   - react-native-blob-util (0.19.2):
     - React-Core
-  - react-native-cache-video (0.1.0):
+  - react-native-cache-video (0.2.0):
     - RCT-Folly (= 2021.07.22.00)
     - React-Core
   - react-native-video (5.2.1):
@@ -707,7 +707,7 @@ SPEC CHECKSUMS:
   React-jsinspector: 194e32c6aab382d88713ad3dd0025c5f5c4ee072
   React-logger: cebf22b6cf43434e471dc561e5911b40ac01d289
   react-native-blob-util: c74e4ce87c76d244761c68623df78bf0d1638271
-  react-native-cache-video: 4e576238441d5655e066ef787b371c9475cc217c
+  react-native-cache-video: 9d16549d3f994014fe0566909d640c0009c5b53b
   react-native-video: c26780b224543c62d5e1b2a7244a5cd1b50e8253
   React-NativeModulesApple: 02e35e9a51e10c6422f04f5e4076a7c02243fff2
   React-perflogger: e3596db7e753f51766bceadc061936ef1472edc3

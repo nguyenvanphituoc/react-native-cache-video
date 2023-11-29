@@ -13,6 +13,9 @@ export default function App() {
   //
   // const _freePolicyRef = React.useRef(new FreePolicy());
   const lfuPolicyRef = React.useRef(new LFUPolicy(5));
+
+  // return <ListVideo />;
+
   return (
     <CacheManagerProvider cachePolicy={lfuPolicyRef.current}>
       {/* <SingleVideo

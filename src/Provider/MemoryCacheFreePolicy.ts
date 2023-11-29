@@ -1,7 +1,7 @@
 import type {
   MemoryCacheDelegate,
   MemoryCachePolicyInterface,
-} from '../../types/type';
+} from '../types/type';
 /**
  *
  * Free policy is a policy that doesn't care about anything, just cache it
