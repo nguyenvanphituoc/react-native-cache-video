@@ -27,12 +27,46 @@ yarn add react-native-blob-util react-native-url-polyfill react-native-cache-vid
 
 Support play with [react-native-video](https://github.com/react-native-video/react-native-video.git)
 
-You can run example folder
+You can run [example](example/) folder. I give two case using with single video item for viewing in detail and using with list of video
+
+Simple using without provider - don't care about your app memory
+
+- You can clear react-native-cache-video folder in your file system by access cacheManager.cacheFolder from useProxyCacheManager
+- This case does not support HLS caching, you need use with Provider
+
+```js
+// your customize video component
+import { useAsyncCache } from 'react-native-cache-video';
+
+const { setVideoPlayUrlBy, cachedVideoUrl } = useAsyncCache();
+
+React.useEffect(() => {
+  setVideoPlayUrlBy(uri);
+}, [setVideoPlayUrlBy, uri]);
+
+<Video source={{ uri: cachedVideoUrl }} />;
+```
+
+Using with Provider - management your cache memory with custom policy
+
+- use useRef to create your policy for once time :`const freePolicyRef = React.useRef(new FreePolicy())` or using global instance to ignore CacheManagerProvider re-enable memory policy for each time your UI re-render
+
+```js
+import {
+  CacheManagerProvider,
+  FreePolicy,
+  LFUPolicy, // last frequency update policy
+} from 'react-native-cache-video';
+    // provide your component access Cache context
+    <CacheManagerProvider cachePolicy={<your policy instance>}>
+    {/* your component */}
+    </CacheManagerProvider>
+```
 
 ```js
 import { useAsyncCache, HLS_CACHING_RESTART } from 'react-native-cache-video';
 
-// your single video component
+// your customize video component
 const { setVideoPlayUrlBy, cachedVideoUrl } = useAsyncCache();
 
 React.useEffect(() => {
@@ -46,7 +80,7 @@ React.useEffect(() => {
   return () => {
     listener.remove();
   };
-}, [setVideoPlayUrlBy, uri, cachedVideoUrl]);
+}, [setVideoPlayUrlBy, uri]);
 
 <Video source={{ uri: cachedVideoUrl }} />;
 ```
