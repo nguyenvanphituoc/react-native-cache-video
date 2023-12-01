@@ -6,6 +6,7 @@ import { useIsForeground } from './useIsForeground';
 import { HLS_CACHING_RESTART } from '../Utils/constants';
 import type { MemoryCachePolicyInterface } from '../types/type';
 import { portGenerate } from '../Utils/util';
+import { isMemoryCachePolicyInterface } from '../user-defined-guard';
 
 //
 /**
@@ -45,7 +46,10 @@ export const CacheManagerProvider = ({
 
   useEffect(() => {
     const server = cacheManager.current;
-    if (cachePolicy) {
+    // check with user define type guard to avoid undefined
+    // apply cache policy that implement MemoryCachePolicyInterface
+
+    if (isMemoryCachePolicyInterface(cachePolicy)) {
       server.enableMemoryCache(cachePolicy);
     }
 
