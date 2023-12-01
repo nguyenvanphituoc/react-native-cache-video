@@ -162,6 +162,10 @@ export class CacheManager
     this._memoryCache = undefined;
   }
 
+  setMemoryCacheDelegate(delegate?: MemoryCacheDelegate<any>) {
+    this._memoryCache?.delegate && (this._memoryCache.delegate = delegate);
+  }
+
   async didEvictHandler(key: string, filePath?: string) {
     if (isHLSUrl(key)) {
       // TODO:
