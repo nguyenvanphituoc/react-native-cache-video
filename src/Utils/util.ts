@@ -364,6 +364,12 @@ export function mergeWithCustomCondition(
 ): { [key in string]: number } {
   const result = { ...origin };
 
+  // ignore if dest is null
+  // because we don't need to merge
+  if (isNull(dest)) {
+    return result;
+  }
+
   Object.entries(dest).forEach(([key, value]) => {
     if (result.hasOwnProperty(key)) {
       result[key] = condition(result[key]!, value);

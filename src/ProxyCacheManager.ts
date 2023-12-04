@@ -27,7 +27,7 @@ import {
 } from './Utils/util';
 
 import { MemoryCacheProvider } from './Provider/MemoryCacheProvider';
-import { BridgeServer } from './Provider/HttpProxyProvider';
+import { BridgeServer } from './Utils/httpProxy';
 import { PreCacheProvider } from './Provider/PreCacheProvider';
 
 export class CacheManager

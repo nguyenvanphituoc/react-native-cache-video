@@ -4,13 +4,7 @@ import type {
   SessionTaskInterface,
 } from '../types/type';
 import { KEY_PREFIX, SIGNAL_NOT_DOWNLOAD_ACTION } from '../Utils/constants';
-import {
-  cacheKey,
-  getCacheKey,
-  isHLSUrl,
-  isMediaUrl,
-  pathReplaceLast,
-} from '../Utils/util';
+import { cacheKey, getCacheKey, isHLSUrl, isMediaUrl } from '../Utils/util';
 
 import type { FetchBlobResponse, StatefulPromise } from '../Utils/session';
 
@@ -34,7 +28,6 @@ export class PreCacheProvider implements PreCacheInterface {
     this.cacheFolder = cacheFolder;
     //
     this.preCacheForList.bind(this);
-    this.prepareSourceStream = this.prepareSourceStream.bind(this);
     this.prepareSourceMedia = this.prepareSourceMedia.bind(this);
     this.cancelCachingList = this.cancelCachingList.bind(this);
     //
@@ -167,89 +160,6 @@ export class PreCacheProvider implements PreCacheInterface {
     }
 
     return Promise.resolve();
-  }
-
-  /**
-   * @deprecated The method should not be used
-   */
-  private async prepareSourceStream(url: string): Promise<string> {
-    const Buffer = require('buffer').Buffer;
-    const { originURL, cacheKey: prepareCacheKey } = getCacheKey(
-      url,
-      this.cacheFolder,
-      KEY_PREFIX
-    );
-    // download INDEPENDENT-SEGMENTS
-    // download first SEGMENT
-    // download MEDIA-SEQUENCE of SEGMENT
-    // ignore download to file system
-    // manually write it by cache provider
-    try {
-      // start download
-      const httpRequest = this.sessionTask.dataTask(originURL.href, {});
-      // mark it as downloading
-      this.cachingUrl[originURL.href] = httpRequest;
-      const { data } = await httpRequest;
-      const newTextData: string[] = Buffer.from(data, 'base64')
-        .toString('utf8')
-        .split('\n');
-
-      const scheme = originURL.protocol;
-      const host = originURL.host;
-
-      const firstPlaylist = newTextData.find((line) => line.endsWith('.m3u8'));
-      const firstSegment = newTextData.find((line) => line.endsWith('.ts'));
-
-      // manually write
-      // this.cache.write(originURL.href, data);
-      // prepare next download
-      if (firstPlaylist) {
-        const playlist = `${scheme}//${host}${pathReplaceLast(
-          originURL.href,
-          firstPlaylist
-        )}`;
-
-        // caching playlist only
-        this.delegate?.onCachingPlaylistSource(
-          originURL.href,
-          data,
-          this.cacheFolder
-        );
-        // ignore segment cache file response
-        // const resolutionPlaylist =
-        await this.prepareSourceStream(playlist);
-      } else if (firstSegment) {
-        // ignore all media sequence cache file response
-        const allMediaSequence = newTextData
-          .filter((line) => line.includes('.ts'))
-          .map(
-            (line) =>
-              `${scheme}//${host}${pathReplaceLast(originURL.href, line)}`
-          );
-
-        // const segments =
-        await Promise.all(
-          allMediaSequence.map((sequenceUrl) =>
-            this.prepareSourceStream(sequenceUrl)
-          )
-        );
-      }
-      // ignore ts cache key for downloaded ts file and segment m3u8
-      // if (prepareCacheKey.endsWith('.ts') || firstSegment) {
-      //   return '';
-      // }
-      // return root m3u8 cache file
-      if (this.errorCachingList[originURL.href]) {
-        delete this.errorCachingList[originURL.href];
-      }
-      return prepareCacheKey;
-    } catch (error) {
-      this.errorCachingList[originURL.href] = prepareCacheKey;
-      throw error;
-      // throw error;
-    } finally {
-      delete this.cachingUrl[originURL.href];
-    }
   }
 
   private async prepareSourceMedia(url: string): Promise<string> {
