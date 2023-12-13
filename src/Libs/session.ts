@@ -9,7 +9,7 @@ import type {
   SessionTaskInterface,
   SessionTaskOptionsType,
 } from '../types/type';
-import { KEY_PREFIX } from './constants';
+import { KEY_PREFIX } from '../Utils/constants';
 
 export * from 'react-native-blob-util';
 
@@ -30,12 +30,14 @@ export class SimpleSessionProvider implements SessionTaskInterface {
       ...options,
     }).fetch('GET', url, {
       'RNFB-Response': 'base64',
+      ...options.headers,
     });
     // mark it as downloading
     this.downloadingList[url] = downloadTask;
     // listen response download
     downloadTask
       .then((res) => {
+        // res.respInfo?.headers && console.log(res.respInfo?.headers);
         callback && callback(res.data, res, undefined);
       })
       .catch((error) => {

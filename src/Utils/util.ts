@@ -142,30 +142,31 @@ export function hashFileName(fileName: string) {
   This will give you two 32-bit hashes which you can concatenate to get a 64-bit hash.
   */
 
-function hash32(str: string) {
-  let h = 2166136261 >>> 0; // offset_basis
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
-  }
-  return h >>> 0;
-}
+// function hash32(str: string) {
+//   let h = 2166136261 >>> 0; // offset_basis
+//   for (let i = 0; i < str.length; i++) {
+//     h ^= str.charCodeAt(i);
+//     h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+//   }
+//   return h >>> 0;
+// }
 
 export function hashFileName(fileName: string) {
-  // let hash = 0;
-  // for (let i = 0; i < fileName.length; i++) {
-  //   // eslint-disable-next-line no-bitwise
-  //   hash = (hash << 5) - hash + fileName.charCodeAt(i);
-  //   // eslint-disable-next-line no-bitwise
-  //   hash |= 0; // Convert to 32bit integer
-  // }
-  // return Math.abs(hash).toString(16).toUpperCase();
-  const halfLength = Math.floor(fileName.length / 2);
-  const firstHalf = fileName.slice(0, halfLength);
-  const secondHalf = fileName.slice(halfLength);
-  const firstHash = hash32(firstHalf).toString(16).padStart(8, '0');
-  const secondHash = hash32(secondHalf).toString(16).padStart(8, '0');
-  return (firstHash + secondHash).toUpperCase();
+  let hash = 0;
+  for (let i = 0; i < fileName.length; i++) {
+    // eslint-disable-next-line no-bitwise
+    hash = (hash << 5) - hash + fileName.charCodeAt(i);
+    // eslint-disable-next-line no-bitwise
+    hash |= 0; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString(16).toUpperCase();
+  //
+  // const halfLength = Math.floor(fileName.length / 2);
+  // const firstHalf = fileName.slice(0, halfLength);
+  // const secondHalf = fileName.slice(halfLength);
+  // const firstHash = hash32(firstHalf).toString(16).padStart(8, '0');
+  // const secondHash = hash32(secondHalf).toString(16).padStart(8, '0');
+  // return (firstHash + secondHash).toUpperCase();
 }
 
 export function cacheKey(
@@ -249,7 +250,6 @@ export function getOriginURL(reqUrl: string, port: number) {
   return urlString;
 }
 
-// DO: Manipulating Playlist
 export function reverseProxyPlaylist(
   data: string,
   reqUrl: string,
@@ -267,8 +267,9 @@ export function reverseProxyPlaylist(
       .join('\n');
 
     const playlistStr = Buffer.from(newTextData, 'utf8');
+    //
 
-    return playlistStr.toString('base64');
+    return playlistStr.toString('base64') as string;
   } catch (error) {
     throw error;
   }
@@ -398,3 +399,44 @@ export const isHLSUrl = (url: string) => {
 
   return fileExt.toLowerCase() === 'm3u8';
 };
+
+/*  Turns segment byterange into a string suitable for use in
+ *  HTTP Range requests
+ */
+export function byteRangeStr(byteRange: { offset: number; length: number }) {
+  var byteRangeStart, byteRangeEnd;
+
+  // Subtract 1 from byteRange end because length includes the 1st byte,
+  // not the last one
+  byteRangeEnd = byteRange.offset + byteRange.length - 1;
+  byteRangeStart = byteRange.offset;
+  return 'bytes=' + byteRangeStart + '-' + byteRangeEnd;
+}
+
+//
+export function absoluteFilePath(
+  filePath: string,
+  options: {
+    [key in string]: string;
+  }
+) {
+  const range = options?.Range || options?.range || options?.RANGE;
+  if (range) {
+    const rangePattern = new RegExp(/bytes=(\d+)-(\d+)/);
+    const result = rangePattern.exec(range);
+    const offset = result?.[1];
+    const length = result?.[2];
+
+    if (offset && length) {
+      // make new filePath in include byteRange
+      // current file path have format: <folder>/<prefix>-<hashname>.<extension>
+      // add byte range to file path before extension
+      const fileExt = getExtensionIfNeed(filePath);
+      const fileName = filePath.replace(`.${fileExt}`, '');
+      const newFilePath = `${fileName}-${offset}-${length}.${fileExt}`;
+      return newFilePath;
+    }
+  }
+
+  return filePath;
+}

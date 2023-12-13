@@ -15,9 +15,10 @@ import {
   // VIDEO_EXTENSIONS,
 } from './Utils/constants';
 
-import { FileBucket, FileSystemManager } from './Utils/fileSystem';
-import { SimpleSessionProvider, type Encoding } from './Utils/session';
+import { FileBucket, FileSystemManager } from './Libs/fileSystem';
+import { SimpleSessionProvider, type Encoding } from './Libs/session';
 import {
+  absoluteFilePath,
   cacheKey,
   getCacheKey,
   getOriginURL,
@@ -27,7 +28,7 @@ import {
 } from './Utils/util';
 
 import { MemoryCacheProvider } from './Provider/MemoryCacheProvider';
-import { BridgeServer } from './Utils/httpProxy';
+import { BridgeServer } from './Libs/httpProxy';
 import { PreCacheProvider } from './Provider/PreCacheProvider';
 
 export class CacheManager
@@ -169,7 +170,7 @@ export class CacheManager
   async didEvictHandler(key: string, filePath?: string) {
     if (isHLSUrl(key)) {
       // TODO:
-      console.warn('didEvictHandler: HLS url not support yet.');
+      // console.warn('didEvictHandler: HLS url not support yet.');
     } else if (key && filePath) {
       await this._storage.unlinkFile(filePath);
     }
@@ -281,22 +282,33 @@ export class CacheManager
     }
     return reverseProxyURL(forUrl, this.runningPort);
   }
-
+  // ======= playlist parser
   private addRequestHandlers() {
     this._bridgeServer &&
       this._bridgeServer.get('*', async (req, res) => {
         const urlStr = getOriginURL(req.url, this.runningPort!);
-        // console.log('====== addRequestHandlers: ', req.url, urlStr);
+
         let filePath = cacheKey(urlStr ?? '', this.cacheFolder, KEY_PREFIX);
         if (!urlStr) {
           return res.send(400, 'text/plain', 'Bad Request');
         }
         //
+        const defaultHeaders = Object.assign({}, req?.headers ?? {});
+        // eslint-disable-next-line dot-notation
+        delete defaultHeaders['Host'];
+        // android
+        delete defaultHeaders['host'];
+        delete defaultHeaders['http-client-ip'];
+        delete defaultHeaders['remote-addr'];
+        //
+        // console.log('====== addRequestHandlers: ', urlStr, defaultHeaders);
+        //
         if (isHLSUrl(urlStr)) {
-          this.addPlaylistHandler(urlStr, filePath, res);
+          this.addPlaylistHandler(urlStr, filePath, defaultHeaders, res);
           //
         } else {
-          this.addSegmentHandler(urlStr, filePath, res);
+          //
+          this.addSegmentHandler(urlStr, filePath, defaultHeaders, res);
         }
       });
   }
@@ -304,6 +316,7 @@ export class CacheManager
   private async addPlaylistHandler(
     forUrl: string,
     __filePath: string,
+    headers: any,
     reverseRes: ResponseInterface
   ) {
     try {
@@ -312,7 +325,9 @@ export class CacheManager
 
       const { data, error, ...response } = await this._sessionTask.dataTask(
         forUrl,
-        {}
+        {
+          headers,
+        }
       );
 
       if (error) {
@@ -324,6 +339,7 @@ export class CacheManager
       }
 
       playlistStr = reverseProxyPlaylist(data, forUrl, port);
+
       this.putCachedFile(forUrl, this.cacheFolder);
       this.getCachedFile(forUrl);
       //
@@ -343,37 +359,46 @@ export class CacheManager
   private async addSegmentHandler(
     forUrl: string,
     filePath: string,
+    headers: any,
     reverseRes: ResponseInterface
   ) {
+    const systemStorage = this._storage;
+    const sessionTask = this._sessionTask;
+    let absFilePath = absoluteFilePath(filePath, headers);
+    //
     try {
-      const cachedData = await this._storage.read(filePath);
+      systemStorage.readStream(absFilePath, async (streamData, streamError) => {
+        if (streamError) {
+          const { data, error, ...response } = await sessionTask.dataTask(
+            forUrl,
+            {
+              headers,
+            }
+          );
 
-      if (cachedData) {
-        return reverseRes.send(200, HLS_VIDEO_TYPE, cachedData);
-      }
+          if (error) {
+            return reverseRes.send(
+              500,
+              'text/plain',
+              'Cannot get data from origin server'
+            );
+          }
+          //
 
-      const { data, error, ...response } = await this._sessionTask.dataTask(
-        forUrl,
-        {}
-      );
+          // do not need to cache segment data
+          // this.syncMemoryCache(forUrl, data);
+          systemStorage.write(absFilePath, data);
+          // console.log('====== addSegmentHandler download cache: ', filePath);
 
-      if (error) {
-        return reverseRes.send(
-          500,
-          'text/plain',
-          'Cannot get data from origin server'
-        );
-      }
-
-      // do not need to cache segment data
-      // this.syncMemoryCache(forUrl, data);
-      this._storage.write(filePath, data);
-
-      reverseRes.send(
-        response.respInfo.status,
-        response.respInfo.headers['Content-Type'],
-        data
-      );
+          return reverseRes.send(
+            200,
+            response.respInfo.headers['Content-Type'],
+            data
+          );
+        }
+        // console.log('====== addSegmentHandler found cache: ', filePath);
+        return reverseRes.send(200, HLS_VIDEO_TYPE, streamData);
+      });
     } catch (error) {
       throw error;
     }

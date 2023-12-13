@@ -1,5 +1,5 @@
 import RNFetchBlob from 'react-native-blob-util';
-import { getExtensionIfNeed } from './util';
+import { getExtensionIfNeed } from '../Utils/util';
 
 import type { Encoding } from 'react-native-blob-util';
 
@@ -169,6 +169,45 @@ export class FileSystemManager {
       return '';
     } catch (error) {
       throw error;
+    }
+  }
+
+  async readStream(
+    resourceURL: string,
+    callback: (data: string, error?: Error) => void,
+    format: Encoding = 'base64',
+    bufferSize: number = 4095
+  ) {
+    try {
+      if (await this.existsFile(resourceURL)) {
+        let data = '';
+        FSManager.readStream(
+          // file path
+          resourceURL,
+          // encoding, should be one of `base64`, `utf8`, `ascii`
+          format,
+          // (optional) buffer size, default to 4096 (4095 for BASE64 encoded data)
+          // when reading file in BASE64 encoding, buffer size must be multiples of 3.
+          bufferSize
+        ).then((ifstream) => {
+          ifstream.open();
+          ifstream.onData((chunk) => {
+            // when encoding is `ascii`, chunk will be an array contains numbers
+            // otherwise it will be a string
+            data += chunk;
+          });
+          ifstream.onError((err) => {
+            callback('', err);
+          });
+          ifstream.onEnd(() => {
+            callback(data);
+          });
+        });
+      } else {
+        callback('', new Error('File not exist'));
+      }
+    } catch (error: any) {
+      callback('', error);
     }
   }
 

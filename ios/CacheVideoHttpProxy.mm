@@ -29,27 +29,35 @@ RCT_EXPORT_MODULE(CacheVideoHttpProxy)
          @synchronized (self) {
            [self->_completionBlocks setObject:completionBlock forKey:requestId];
          }
+      
+        NSMutableDictionary *combinedDict = [request.headers mutableCopy];
 
         @try {
             if ([GCDWebServerTruncateHeaderValue(request.contentType) isEqualToString:@"application/json"]) {
 //          if (false) {
                 GCDWebServerDataRequest* dataRequest = (GCDWebServerDataRequest*)request;
+              
+              [combinedDict addEntriesFromDictionary:@{@"requestId": requestId,
+                                                       @"postData": dataRequest.jsonObject,
+                                                       @"type": type,
+                                                       @"url": request.URL.relativeString}];
                 [self.bridge.eventDispatcher sendAppEventWithName:@"httpServerResponseReceived"
-                                                             body:@{@"requestId": requestId,
-                                                                    @"postData": dataRequest.jsonObject,
-                                                                    @"type": type,
-                                                                    @"url": request.URL.relativeString}];
+                                                             body:combinedDict];
             } else {
+              [combinedDict addEntriesFromDictionary:@{@"requestId": requestId,
+                                                       @"type": type,
+                                                       @"url": request.URL.relativeString}];
+              
                 [self.bridge.eventDispatcher sendAppEventWithName:@"httpServerResponseReceived"
-                                                             body:@{@"requestId": requestId,
-                                                                    @"type": type,
-                                                                    @"url": request.URL.relativeString}];
+                                                             body:combinedDict];
             }
         } @catch (NSException *exception) {
+            [combinedDict addEntriesFromDictionary:@{@"requestId": requestId,
+                                                     @"type": type,
+                                                     @"url": request.URL.relativeString}];
+          
             [self.bridge.eventDispatcher sendAppEventWithName:@"httpServerResponseReceived"
-                                                         body:@{@"requestId": requestId,
-                                                                @"type": type,
-                                                                @"url": request.URL.relativeString}];
+                                                         body:combinedDict];
         }
     }];
 }
@@ -111,9 +119,9 @@ RCT_EXPORT_METHOD(respond: (NSString *) requestId
         completionBlock = [_completionBlocks objectForKey:requestId];
         [_completionBlocks removeObjectForKey:requestId];
     }
-  
+
     if (completionBlock) {
-      
+
       completionBlock(requestResponse);
     }
 }

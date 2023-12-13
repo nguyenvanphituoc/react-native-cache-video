@@ -112,6 +112,10 @@ public class Server extends NanoHTTPD {
         request.putString("type", method.name());
         request.putString("requestId", requestId);
 
+        session.getHeaders().forEach(
+          (key, value) -> request.putString(key, value)
+        );
+
         Map<String, String> files = new HashMap<>();
         session.parseBody(files);
         if (files.size() > 0) {

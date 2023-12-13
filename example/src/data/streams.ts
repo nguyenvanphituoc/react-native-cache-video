@@ -13,6 +13,17 @@ export const mediaJSON = {
           title: 'Big Buck Bunny',
         },
         {
+          description:
+            'Introducing Chromecast. The easiest way to enjoy online video and music on your TV—for the times that call for bigger joyrides. For $35. Learn how to use Chromecast with YouTube and more at google.com/chromecast.',
+          sources: [
+            'https://res.cloudinary.com/dannykeane/video/upload/sp_full_hd/q_80:qmax_90,ac_none/v1/dk-memoji-dark.m3u8',
+          ],
+          subtitle: 'By Google',
+          thumb:
+            'https://storage.googleapis.com/gtv-videos-bucket/sample/images/ForBiggerFun.jpg',
+          title: 'For Bigger Joyrides',
+        },
+        {
           description: 'The first Blender Open Movie from 2006',
           sources: [
             'http://sample.vodobox.net/skate_phantom_flex_4k/skate_phantom_flex_4k.m3u8',
@@ -54,17 +65,6 @@ export const mediaJSON = {
           thumb:
             'https://storage.googleapis.com/gtv-videos-bucket/sample/images/ForBiggerEscapes.jpg',
           title: 'For Bigger Fun',
-        },
-        {
-          description:
-            'Introducing Chromecast. The easiest way to enjoy online video and music on your TV—for the times that call for bigger joyrides. For $35. Learn how to use Chromecast with YouTube and more at google.com/chromecast.',
-          sources: [
-            'https://res.cloudinary.com/dannykeane/video/upload/sp_full_hd/q_80:qmax_90,ac_none/v1/dk-memoji-dark.m3u8',
-          ],
-          subtitle: 'By Google',
-          thumb:
-            'https://storage.googleapis.com/gtv-videos-bucket/sample/images/ForBiggerFun.jpg',
-          title: 'For Bigger Joyrides',
         },
         {
           description:

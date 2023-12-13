@@ -22,7 +22,7 @@ export default function App() {
         // uri={'http://content.jwplatform.com/manifests/vM7nH0Kl.m3u8'}
         // uri="https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8"
         // uri="https://d1gnaphp93fop2.cloudfront.net/videos/multiresolution/rendition_new10.m3u8"
-        uri="https://res.cloudinary.com/dannykeane/video/upload/sp_full_hd/q_80:qmax_90,ac_none/v1/dk-memoji-dark.m3u8"
+        uri="https://res.cloudinary.com/ddzjqtjjz/video/upload/v1702440443/dcff505b-b110-40df-b855-81b1e19c761b_20231129T07552710221_y3gywa.mp4"
         thumb={
           'https://storage.googleapis.com/gtv-videos-bucket/sample/images/BigBuckBunny.jpg'
         }

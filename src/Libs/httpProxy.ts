@@ -59,12 +59,17 @@ class Request implements RequestInterface {
   postData: string;
   type: string;
   url: string;
+  headers: {
+    [key in string]: string;
+  };
 
   constructor(rawRequest: any) {
-    this.requestId = rawRequest.requestId;
-    this.postData = rawRequest.postData;
-    this.type = rawRequest.type;
-    this.url = rawRequest.url;
+    const { requestId, postData, type, url, ...headers } = rawRequest;
+    this.requestId = requestId;
+    this.postData = postData;
+    this.type = type;
+    this.url = url;
+    this.headers = headers;
   }
 
   get data() {

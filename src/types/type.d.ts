@@ -5,6 +5,9 @@ export interface RequestInterface {
   type: string;
   url: string;
   data: any;
+  headers: {
+    [key in string]: string;
+  };
 }
 
 export interface ResponseInterface {
@@ -96,6 +99,7 @@ export type SessionTaskOptionsType = {
   path?: string;
   wifiOnly?: boolean;
   responseEncoding?: 'base64' | 'utf8';
+  headers?: { [key in string]: string };
 };
 //
 export interface SessionTaskInterface {

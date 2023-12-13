@@ -17,7 +17,8 @@ export const mediaJSON = {
         {
           description: 'The first Blender Open Movie from 2006',
           sources: [
-            'http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+            'https://res.cloudinary.com/ddzjqtjjz/video/upload/v1702440443/dcff505b-b110-40df-b855-81b1e19c761b_20231129T07552710221_y3gywa.mp4',
+            // 'http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
           ],
           subtitle: 'By Blender Foundation',
           thumb:

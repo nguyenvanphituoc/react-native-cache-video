@@ -6,7 +6,7 @@ import type {
 import { KEY_PREFIX, SIGNAL_NOT_DOWNLOAD_ACTION } from '../Utils/constants';
 import { cacheKey, getCacheKey, isHLSUrl, isMediaUrl } from '../Utils/util';
 
-import type { FetchBlobResponse, StatefulPromise } from '../Utils/session';
+import type { FetchBlobResponse, StatefulPromise } from '../Libs/session';
 
 export class PreCacheProvider implements PreCacheInterface {
   private isRunningThread = false;
