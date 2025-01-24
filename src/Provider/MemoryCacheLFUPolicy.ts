@@ -28,9 +28,6 @@ export class LFUPolicy implements MemoryCachePolicyInterface {
       [key in string]: number;
     };
     this.capacity = capacity;
-
-    this.onAccess.bind(this);
-    this.onEvict.bind(this);
   }
 
   clear(): void {

@@ -55,30 +55,6 @@ export class CacheManager
     this._bridgeServer = new BridgeServer(serverName, devMode);
     this._preCache = new PreCacheProvider(this.cacheFolder, this._sessionTask);
     this._preCache.delegate = this;
-    //
-    this.preCacheFor = this.preCacheFor.bind(this);
-    this.preCacheForList = this.preCacheForList.bind(this);
-    this.onCachingPlaylistSource = this.onCachingPlaylistSource.bind(this);
-    this.contain = this.contain.bind(this);
-    this.existsFile = this.existsFile.bind(this);
-    //
-    this.putCachedFile = this.putCachedFile.bind(this);
-    this.getCachedFile = this.getCachedFile.bind(this);
-    this.getCachedFileAsync = this.getCachedFileAsync.bind(this);
-    //
-    this.enableMemoryCache = this.enableMemoryCache.bind(this);
-    this.disableMemoryCache = this.disableMemoryCache.bind(this);
-    this.saveCacheToStorage = this.saveCacheToStorage.bind(this);
-    this.loadCacheFromStorage = this.loadCacheFromStorage.bind(this);
-    this.didEvictHandler = this.didEvictHandler.bind(this);
-    //
-    this.enableBridgeServer = this.enableBridgeServer.bind(this);
-    this.disableBridgeServer = this.disableBridgeServer.bind(this);
-    this.reverseProxyURL = this.reverseProxyURL.bind(this);
-    this.addRequestHandlers = this.addRequestHandlers.bind(this);
-    this.addPlaylistHandler = this.addPlaylistHandler.bind(this);
-    this.addSegmentHandler = this.addSegmentHandler.bind(this);
-    //
   }
 
   get memoryCache() {
