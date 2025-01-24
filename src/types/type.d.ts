@@ -50,6 +50,8 @@ export interface MemoryCachePolicyInterface {
   // cache policy
   onAccess(cache: Map<string, any>, key: string): void;
   onEvict(cache: Map<string, any>, delegate?: MemoryCacheDelegate<any>): void;
+  clear(): void;
+  removeEntry(key: string): void;
   //
   get dataSource(): any;
   set dataSource(data: any);
@@ -63,6 +65,7 @@ export interface MemoryCacheInterface<Value> {
     referenceBit: any;
   };
   load: (jsonStr: string) => void;
+  clear: () => void;
   //
   put: (key: string, value: Value) => void;
   get: (key: string) => Value | undefined;

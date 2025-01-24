@@ -81,6 +81,10 @@ export class CacheManager
     //
   }
 
+  get memoryCache() {
+    return this._memoryCache;
+  }
+
   get sessionTask() {
     return this._sessionTask;
   }
@@ -123,10 +127,17 @@ export class CacheManager
     url: string,
     folder: string = this.cacheFolder
   ): Promise<string | undefined> {
-    // access cache in memory first
+    // Check memory cache first
     const cachedKey = this.getCachedFile(url);
     if (cachedKey) {
-      return cachedKey;
+      // Verify file still exists
+      if (await this._storage.existsFile(cachedKey)) {
+        return cachedKey;
+      } else {
+        // File missing - clean up cache entries
+        this._memoryCache?.syncCache(url);
+        return undefined;
+      }
     }
 
     // access cache in file system
@@ -161,6 +172,46 @@ export class CacheManager
     this.saveCacheToStorage();
     this._memoryCache?.delegate && (this._memoryCache.delegate = undefined);
     this._memoryCache = undefined;
+  }
+
+  clearMemoryCache(): void {
+    if (this._memoryCache) {
+      this._memoryCache?.clear();
+    }
+  }
+
+  async clearCache(): Promise<void> {
+    // Clear memory cache and policy
+    this.clearMemoryCache();
+
+    // Clear all files from cache directory
+    const cacheDir = this._storage.getBucketFolder(FileBucket.cache);
+    await this._storage.clearDirectory(cacheDir);
+  }
+
+  async removeCachedVideo(url: string): Promise<void> {
+    if (!this._memoryCache) {
+      return;
+    }
+
+    // Get the original URL (needed as the key for memory cache)
+    const { originURL } = getCacheKey(url, this.cacheFolder, KEY_PREFIX);
+    const key = originURL.href;
+
+    // First get the cached file path
+    const cachedPath = await this.getCachedFileAsync(url);
+
+    // Clean up memory cache/policy regardless of file existence
+    this._memoryCache.syncCache(key);
+
+    // If we had a cached path, try to delete the file
+    if (cachedPath) {
+      try {
+        await this.didEvictHandler(key, cachedPath);
+      } catch (error) {
+        // Still succeeded in cleaning cache/policy even if file deletion failed
+      }
+    }
   }
 
   setMemoryCacheDelegate(delegate?: MemoryCacheDelegate<any>) {

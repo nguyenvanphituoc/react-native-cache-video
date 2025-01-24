@@ -56,6 +56,8 @@ export class MemoryCacheProvider<V> implements MemoryCacheInterface<V> {
     } else {
       // remove
       this.cache.delete(key);
+      // Also clean up policy tracking when removing
+      this.cachePolicy.removeEntry(key);
     }
   }
   //
@@ -95,4 +97,12 @@ export class MemoryCacheProvider<V> implements MemoryCacheInterface<V> {
     }
   }
   //
+
+  clear(): void {
+    // Clear the actual cache
+    this.cache = new Map<string, V>();
+
+    // Clear the policy tracking
+    this.cachePolicy.clear();
+  }
 }

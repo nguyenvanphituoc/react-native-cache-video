@@ -59,8 +59,23 @@ export const useAsyncCache = () => {
     [cacheManager, delayUpdateVideo]
   );
 
+  const removeVideoFromCache = useCallback(
+    async (url: string) => {
+      if (cacheManager) {
+        await cacheManager.removeCachedVideo(url);
+        // Clear our local state if this was the current video
+        if (url === currentVideoUrl.current) {
+          currentVideoUrl.current = undefined;
+          setVideoUrl(undefined);
+        }
+      }
+    },
+    [cacheManager]
+  );
+
   return {
     setVideoPlayUrlBy,
     cachedVideoUrl,
+    removeVideoFromCache,
   };
 };

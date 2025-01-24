@@ -33,6 +33,14 @@ export class LFUPolicy implements MemoryCachePolicyInterface {
     this.onEvict.bind(this);
   }
 
+  clear(): void {
+    this.referenceBit = {};
+  }
+
+  removeEntry(key: string): void {
+    delete this.referenceBit[key];
+  }
+
   onAccess(cache: Map<string, any>, key: string) {
     // Update access frequency for the item
     const value = cache.get(key);
@@ -59,10 +67,19 @@ export class LFUPolicy implements MemoryCachePolicyInterface {
 
     // Evict the least recently used item (at the end)
     for (const key in this.referenceBit) {
+      if (!cache.has(key)) {
+        // Only consider keys that actually exist in the cache
+        delete this.referenceBit[key]; // Clean up stale reference
+        continue;
+      }
+
       const freq = this.referenceBit[key];
-      if (freq && freq < minFreq && freq !== SECOND_CHANCE_TO_COUNT) {
-        minFreq = freq;
-        lfuKey = key;
+      if (freq && freq < minFreq) {
+        // Consider SECOND_CHANCE_TO_COUNT items if nothing else found
+        if (freq !== SECOND_CHANCE_TO_COUNT || lfuKey === null) {
+          minFreq = freq;
+          lfuKey = key;
+        }
       }
     }
 
@@ -71,6 +88,16 @@ export class LFUPolicy implements MemoryCachePolicyInterface {
       cache.delete(lfuKey);
       delete this.referenceBit[lfuKey];
       delegate && delegate.didEvictHandler(lfuKey, value);
+    } else if (cache.size >= this.capacity) {
+      // If we couldn't find anything to evict but still need space,
+      // evict the first item (oldest by insertion order)
+      const firstKey = cache.keys().next().value;
+      if (firstKey) {
+        const value = cache.get(firstKey);
+        cache.delete(firstKey);
+        delete this.referenceBit[firstKey];
+        delegate && delegate.didEvictHandler(firstKey, value);
+      }
     }
   }
   //

@@ -12,6 +12,10 @@ export class FreePolicy implements MemoryCachePolicyInterface {
     this.onEvict.bind(this);
   }
 
+  clear() {}
+
+  removeEntry(_key: string) {}
+
   onAccess(_cache: Map<string, any>, _key: string) {}
 
   onEvict(_cache: Map<string, any>, _delegate?: MemoryCacheDelegate<any>) {}
