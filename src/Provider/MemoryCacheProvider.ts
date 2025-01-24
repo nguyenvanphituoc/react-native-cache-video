@@ -31,6 +31,9 @@ export class MemoryCacheProvider<V> implements MemoryCacheInterface<V> {
   get(key: string): V | undefined {
     // Update access time or frequency based on the policy
     this.cachePolicy.onAccess(this.cache, key);
+
+    this.cachePolicy.onEvict(this.cache, this.delegate, key);
+
     return this.cache.get(key);
   }
   put(key: string, value: V): void {
@@ -43,7 +46,7 @@ export class MemoryCacheProvider<V> implements MemoryCacheInterface<V> {
       // set for new key only, give it a chance to be counted
       this.cachePolicy.dataSource[key] = SECOND_CHANCE_TO_COUNT;
       // If the cache is full, apply the replacement policy to evict an item
-      this.cachePolicy.onEvict(this.cache, this.delegate);
+      this.cachePolicy.onEvict(this.cache, this.delegate, key);
     }
 
     this.cache.set(key, value);

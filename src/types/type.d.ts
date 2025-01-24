@@ -49,7 +49,11 @@ export interface MemoryCacheDelegate<Value> {
 export interface MemoryCachePolicyInterface {
   // cache policy
   onAccess(cache: Map<string, any>, key: string): void;
-  onEvict(cache: Map<string, any>, delegate?: MemoryCacheDelegate<any>): void;
+  onEvict(
+    cache: Map<string, any>,
+    delegate?: MemoryCacheDelegate<any>,
+    triggerKey?: string
+  ): void;
   clear(): void;
   removeEntry(key: string): void;
   //
