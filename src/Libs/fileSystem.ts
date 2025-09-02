@@ -133,6 +133,14 @@ export class FileSystemManager {
     return {} as Awaited<ReturnType<typeof FSManager.stat>>;
   }
 
+  async getStatisticList(directory?: string) {
+    if (directory) {
+      const lstat = await FSManager.lstat(directory);
+      return lstat;
+    }
+    return [] as Awaited<ReturnType<typeof FSManager.lstat>>;
+  }
+
   async existsFile(forFile: string): Promise<boolean> {
     // let key = cacheKey(forKey, folder);
     // check exist and ignore timestamp path

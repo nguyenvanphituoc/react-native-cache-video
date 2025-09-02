@@ -27,10 +27,6 @@ export class PreCacheProvider implements PreCacheInterface {
     this.sessionTask = sessionTask;
     this.cacheFolder = cacheFolder;
     //
-    this.preCacheForList.bind(this);
-    this.prepareSourceMedia = this.prepareSourceMedia.bind(this);
-    this.cancelCachingList = this.cancelCachingList.bind(this);
-    //
   }
 
   // MARK: - Pre-cache

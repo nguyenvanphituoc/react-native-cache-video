@@ -7,10 +7,11 @@ import type {
  * Free policy is a policy that doesn't care about anything, just cache it
  */
 export class FreePolicy implements MemoryCachePolicyInterface {
-  constructor() {
-    this.onAccess.bind(this);
-    this.onEvict.bind(this);
-  }
+  constructor() {}
+
+  clear() {}
+
+  removeEntry(_key: string) {}
 
   onAccess(_cache: Map<string, any>, _key: string) {}
 
