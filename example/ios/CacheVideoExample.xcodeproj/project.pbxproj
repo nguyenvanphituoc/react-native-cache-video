@@ -440,6 +440,10 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"DEBUG=1",
 					"$(inherited)",
+					"FMT_USE_CONSTEVAL=0",
+					"FOLLY_NO_CONFIG=1",
+					"FOLLY_CFG_NO_COROUTINES=1",
+					"FOLLY_HAVE_CLOCK_GETTIME=1",
 				);
 				INFOPLIST_FILE = CacheVideoExampleTests/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
@@ -465,6 +469,13 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				COPY_PHASE_STRIP = NO;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"FMT_USE_CONSTEVAL=0",
+					"FOLLY_NO_CONFIG=1",
+					"FOLLY_CFG_NO_COROUTINES=1",
+					"FOLLY_HAVE_CLOCK_GETTIME=1",
+				);
 				INFOPLIST_FILE = CacheVideoExampleTests/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -495,6 +506,13 @@
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = C24Z3V3TRZ;
 				ENABLE_BITCODE = NO;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = i386;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"FMT_USE_CONSTEVAL=0",
+					"FOLLY_NO_CONFIG=1",
+					"FOLLY_CFG_NO_COROUTINES=1",
+					"FOLLY_HAVE_CLOCK_GETTIME=1",
+				);
 				INFOPLIST_FILE = CacheVideoExample/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -526,6 +544,13 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = C24Z3V3TRZ;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"FMT_USE_CONSTEVAL=0",
+					"FOLLY_NO_CONFIG=1",
+					"FOLLY_CFG_NO_COROUTINES=1",
+					"FOLLY_HAVE_CLOCK_GETTIME=1",
+				);
 				INFOPLIST_FILE = CacheVideoExample/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

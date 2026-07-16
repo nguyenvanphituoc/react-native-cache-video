@@ -35,14 +35,40 @@ target 'CacheVideoExample' do
       config[:reactNativePath],
       :mac_catalyst_enabled => false
     )
-    # Xcode 26 (clang >= 20) rejects fmt 11.0's consteval format-string checks
-    # (fixed upstream in fmt >= 11.1, which RN 0.76 predates). Disabling
-    # FMT_CONSTEVAL keeps the checks at runtime and unblocks the build.
-    installer.pods_project.targets.each do |target|
-      target.build_configurations.each do |config|
-        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
-        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << 'FMT_USE_CONSTEVAL=0'
+    # Xcode 26 (clang >= 20) needs three C/C++ workarounds for RN 0.81's bundled deps:
+    #   FMT_USE_CONSTEVAL=0      fmt 11.0's consteval format-string checks are rejected
+    #                            by clang >= 20 (fixed upstream in fmt >= 11.1, which
+    #                            RN 0.81 still predates); keep the checks at runtime.
+    #   FOLLY_CFG_NO_COROUTINES=1  clang enables C++20 coroutines, so RCT-Folly's
+    #                            Expected.h pulls in <folly/coro/Coroutine.h>, which the
+    #                            CocoaPods RCT-Folly pod does not vend. RN's own pods pass
+    #                            this flag; third-party pods (react-native-blob-util) and
+    #                            the app target (AppDelegate.mm imports Folly) do not.
+    #   FOLLY_HAVE_CLOCK_GETTIME=1  the iOS 26 SDK now declares clockid_t/clock_gettime,
+    #                            but Folly's portability/Time.h still redefines clockid_t
+    #                            unless it knows the platform has clock_gettime.
+    xcode26_defs = ['FMT_USE_CONSTEVAL=0', 'FOLLY_NO_CONFIG=1',
+                    'FOLLY_CFG_NO_COROUTINES=1', 'FOLLY_HAVE_CLOCK_GETTIME=1']
+    apply_xcode26_defs = ->(config) {
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+      xcode26_defs.each do |d|
+        config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] << d unless
+          config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'].include?(d)
       end
+    }
+    # Pods project targets (RCT-Folly, blob-util, etc.)
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each { |config| apply_xcode26_defs.call(config) }
+    end
+    # The main app target lives in the user project, not the Pods project, so the loop
+    # above never reaches it — but AppDelegate.mm imports RCT-Folly and needs the flags too.
+    installer.aggregate_targets.each do |aggregate_target|
+      user_project = aggregate_target.user_project
+      next if user_project.nil?
+      user_project.native_targets.each do |target|
+        target.build_configurations.each { |config| apply_xcode26_defs.call(config) }
+      end
+      user_project.save
     end
     # Belt-and-suspenders: build-setting injection proved unreliable under the
     # Xcode 26 build system, so patch fmt's consteval gate at the source.

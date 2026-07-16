@@ -19,6 +19,8 @@ Support cache video type when playing in Video component
 - iOS: Obj-C++ TurboModule (iOS >= 15.1); events are emitted through a bridgeless-safe path
 - The public JS API is unchanged — events still arrive via `DeviceEventEmitter` (`httpServerResponseReceived` stays internal to the library)
 
+> **Library floor vs. example toolchain:** the published library still supports **RN >= 0.76** (its minimum is unchanged). The bundled `example/` app is pinned to **RN 0.81.6** so it builds under **Xcode 26.4** (iOS 26 SDK) and the current Android 16 / AGP 8.11 toolchain — see the changelog note below.
+
 ## Changelog
 
 ### 0.4.0 — New Architecture migration (breaking)
@@ -30,6 +32,19 @@ Support cache video type when playing in Video component
 - Removed the leftover `multiply` example method everywhere
 - Tooling: AGP 8 / Kotlin 1.9 / JDK 17 / minSdk 24; builder-bob 0.30; podspec collapsed to the modern `install_modules_dependencies` form
 - Example app upgraded to RN 0.76 with `newArchEnabled=true`, Flipper removed, react-native-video v6
+
+### Example app — RN 0.81.6 for Xcode 26.4 (toolchain only; library floor stays 0.76)
+
+The bundled `example/` was bumped from RN 0.76.9 → **0.81.6** so it compiles and runs on **Xcode 26.4 (iOS 26 SDK)**. This does **not** change the library's own minimum (still RN 0.76). Verified building on Xcode 26.4 (iOS) and Gradle 8.14.1 / AGP 8.11 / SDK 36 (Android). Changes, all confined to `example/` plus the library's Android gradle defaults:
+
+- `example/package.json`: RN **0.81.6**, React **19.1.4**, `@react-native-community/cli` **20.2.0**, `@react-native/*` **0.81.6**, `react-native-video` **6.19.2**, Node engine **>= 20.19.4**
+- Android: SDK/target **36**, buildTools **36**, NDK **27.1.12297006**, Kotlin **2.1.20**, AGP **8.11.0**, Gradle wrapper **8.14.1**, JSC → `io.github.react-native-community:jsc-android`, `edgeToEdgeEnabled=false`
+- Library Android gradle defaults aligned to the same Kotlin/AGP/SDK (minSdk unchanged at 24)
+- `example/metro.config.js` rewritten to use `react-native-builder-bob/metro-config`'s `getConfig` — Metro 0.83 (RN 0.81) removed the `metro-config/src/defaults/exclusionList` subpath and the `blacklistRE` option the old hand-rolled config relied on. Run Metro with `--reset-cache` once after the bump.
+- **Xcode 26 iOS build workarounds** (in `example/ios/Podfile` `post_install`, applied to pod **and** app targets — RN 0.81 still bundles fmt 11.0.2 + Folly 2024.11.18):
+  - `FMT_USE_CONSTEVAL=0` — clang ≥ 20 rejects fmt 11.0's `consteval` format checks (+ source patch of `fmt/base.h`)
+  - `FOLLY_CFG_NO_COROUTINES=1` — C++20 coroutines make RCT-Folly `Expected.h` include the unvended `folly/coro/Coroutine.h`
+  - `FOLLY_HAVE_CLOCK_GETTIME=1` — the iOS 26 SDK now declares `clockid_t`, which Folly's `portability/Time.h` otherwise redefines
 
 ## Installation
 
