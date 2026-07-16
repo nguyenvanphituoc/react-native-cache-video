@@ -39,7 +39,9 @@ export default function VideoList() {
       renderItem={({ item, index }) => (
         <View style={{ flex: 1, height: dimension.height }}>
           <VideoItem
-            ref={(ref) => (videoRefs.current[index] = ref)}
+            ref={(ref) => {
+              videoRefs.current[index] = ref;
+            }}
             uri={item.sources[0] ?? ''}
             thumb={item.thumb}
           />

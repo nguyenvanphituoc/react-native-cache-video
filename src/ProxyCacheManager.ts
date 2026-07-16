@@ -9,11 +9,28 @@ import type {
   MemoryCachePolicyInterface,
 } from './types/type';
 import {
+  HLS_CONTENT_TYPE,
   HLS_VIDEO_TYPE,
   KEY_PREFIX,
   SIGNAL_NOT_DOWNLOAD_ACTION,
   // VIDEO_EXTENSIONS,
 } from './Utils/constants';
+
+// HTTP/2 origins deliver lowercase header names; a bare ['Content-Type'] lookup
+// sends undefined over the bridge as the respond() type param (INV-08).
+function contentTypeOf(
+  headers: { [key: string]: string } | undefined,
+  fallback: string
+): string {
+  if (headers) {
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'content-type') {
+        return headers[key] ?? fallback;
+      }
+    }
+  }
+  return fallback;
+}
 
 import { FileBucket, FileSystemManager } from './Libs/fileSystem';
 import { SimpleSessionProvider, type Encoding } from './Libs/session';
@@ -372,7 +389,7 @@ export class CacheManager
       //
       reverseRes.send(
         response.respInfo.status,
-        response.respInfo.headers['Content-Type'],
+        contentTypeOf(response.respInfo.headers, HLS_CONTENT_TYPE),
         playlistStr
       );
 
@@ -419,7 +436,7 @@ export class CacheManager
 
           return reverseRes.send(
             200,
-            response.respInfo.headers['Content-Type'],
+            contentTypeOf(response.respInfo.headers, HLS_VIDEO_TYPE),
             data
           );
         }

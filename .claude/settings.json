@@ -1,0 +1,13 @@
+{
+  "enabledPlugins": {
+    "shapeup-sdlc-plugin@nvptuoc-marketplace": true
+  },
+  "extraKnownMarketplaces": {
+    "nvptuoc-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "nguyenvanphituoc/shapeup-sdlc-plugin"
+      }
+    }
+  }
+}

@@ -9,6 +9,28 @@ Support cache video type when playing in Video component
 - [x] Byte-Range Support for Segments
 - [ ] Pre caching for list/ while scrolling
 
+## Requirements
+
+**As of v0.4.0 this library is New-Architecture-only.**
+
+- React Native **>= 0.76** (New Architecture / bridgeless — the 0.76 default)
+- The old bridge architecture is **not supported**; use v0.3.x on RN < 0.76 / old-arch apps
+- Android: Kotlin implementation extending the codegen-generated TurboModule spec (minSdk 24, JDK 17)
+- iOS: Obj-C++ TurboModule (iOS >= 15.1); events are emitted through a bridgeless-safe path
+- The public JS API is unchanged — events still arrive via `DeviceEventEmitter` (`httpServerResponseReceived` stays internal to the library)
+
+## Changelog
+
+### 0.4.0 — New Architecture migration (breaking)
+
+- **Breaking:** drops old-bridge support entirely; requires RN >= 0.76 with the New Architecture (bridgeless) enabled
+- Android rewritten in Kotlin (`CacheVideoHttpProxyModule`, `BaseReactPackage`, `Server`), extending the codegen-generated `NativeCacheVideoHttpProxySpec`; events now use `ReactContext.emitDeviceEvent`
+- iOS emits events via `RCTCallableJSModules` (bridgeless-safe; the old `bridge.eventDispatcher` path silently dropped events under bridgeless), fixes the generated JSI class name, and removes a `dispatch_sync` deadlock hazard in `start`
+- Fixed `respond` requestId type in the TurboModule spec (`number` → `string`, matching the actual runtime value); `respond` tolerates a null content-type from HTTP/2 origins
+- Removed the leftover `multiply` example method everywhere
+- Tooling: AGP 8 / Kotlin 1.9 / JDK 17 / minSdk 24; builder-bob 0.30; podspec collapsed to the modern `install_modules_dependencies` form
+- Example app upgraded to RN 0.76 with `newArchEnabled=true`, Flipper removed, react-native-video v6
+
 ## Installation
 
 with npm

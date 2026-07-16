@@ -1,21 +1,26 @@
 #import "CacheVideoHttpProxy.h"
-#import "React/RCTBridge.h"
 #import "React/RCTLog.h"
-#import "React/RCTEventDispatcher.h"
 
 #import "GCDWebServer.h"
 #import "GCDWebServerDataResponse.h"
 #import "GCDWebServerDataRequest.h"
 #import "GCDWebServerPrivate.h"
 
-static RCTBridge *bridge;
 @implementation CacheVideoHttpProxy
 
-@synthesize bridge = _bridge;
+@synthesize callableJSModules = _callableJSModules;
 
 GCDWebServer* _webServer;
 
 RCT_EXPORT_MODULE(CacheVideoHttpProxy)
+
+// Bridgeless-safe device event emission: same JS surface as DeviceEventEmitter,
+// without touching the (removed) bridge. See contracts/http-server-event.contract.md.
+- (void)sendServerEvent:(NSDictionary *)body {
+    [_callableJSModules invokeModule:@"RCTDeviceEventEmitter"
+                              method:@"emit"
+                            withArgs:@[@"httpServerResponseReceived", body]];
+}
 
 - (void)initResponseReceivedFor:(GCDWebServer *)server forType:(NSString*)type {
     [server addDefaultHandlerForMethod:type
@@ -29,59 +34,51 @@ RCT_EXPORT_MODULE(CacheVideoHttpProxy)
          @synchronized (self) {
            [self->_completionBlocks setObject:completionBlock forKey:requestId];
          }
-      
+
         NSMutableDictionary *combinedDict = [request.headers mutableCopy];
 
         @try {
             if ([GCDWebServerTruncateHeaderValue(request.contentType) isEqualToString:@"application/json"]) {
-//          if (false) {
                 GCDWebServerDataRequest* dataRequest = (GCDWebServerDataRequest*)request;
-              
+
               [combinedDict addEntriesFromDictionary:@{@"requestId": requestId,
                                                        @"postData": dataRequest.jsonObject,
                                                        @"type": type,
                                                        @"url": request.URL.relativeString}];
-                [self.bridge.eventDispatcher sendAppEventWithName:@"httpServerResponseReceived"
-                                                             body:combinedDict];
+                [self sendServerEvent:combinedDict];
             } else {
               [combinedDict addEntriesFromDictionary:@{@"requestId": requestId,
                                                        @"type": type,
                                                        @"url": request.URL.relativeString}];
-              
-                [self.bridge.eventDispatcher sendAppEventWithName:@"httpServerResponseReceived"
-                                                             body:combinedDict];
+
+                [self sendServerEvent:combinedDict];
             }
         } @catch (NSException *exception) {
             [combinedDict addEntriesFromDictionary:@{@"requestId": requestId,
                                                      @"type": type,
                                                      @"url": request.URL.relativeString}];
-          
-            [self.bridge.eventDispatcher sendAppEventWithName:@"httpServerResponseReceived"
-                                                         body:combinedDict];
+
+            [self sendServerEvent:combinedDict];
         }
     }];
 }
 
-// Example method
-// See // https://reactnative.dev/docs/native-modules-ios
-RCT_EXPORT_METHOD(multiply:(double)a
-                  b:(double)b
-                  resolve:(RCTPromiseResolveBlock)resolve
-                  reject:(RCTPromiseRejectBlock)reject)
-{
-    NSNumber *result = @(a * b);
-
-    resolve(result);
-}
-
-RCT_EXPORT_METHOD(start:(NSInteger) port
+RCT_EXPORT_METHOD(start:(double) port
                   serviceName:(NSString *) serviceName)
 {
-    RCTLogInfo(@"Running HTTP bridge server: %ld", port);
+    RCTLogInfo(@"Running HTTP bridge server: %ld", (long)port);
 
-    _completionBlocks = [[NSMutableDictionary alloc] init];
+    @synchronized (self) {
+        // Init-once: re-creating the map on a repeat start would orphan
+        // completion blocks of requests still in flight (INV-01).
+        if (_completionBlocks == nil) {
+            _completionBlocks = [[NSMutableDictionary alloc] init];
+        }
+    }
 
-    dispatch_sync(dispatch_get_main_queue(), ^{
+    // Async dispatch only: TurboModule methods may already run on the main
+    // thread, where a synchronous hop onto main deadlocks (INV-04).
+    dispatch_async(dispatch_get_main_queue(), ^{
         _webServer = [[GCDWebServer alloc] init];
 
         [self initResponseReceivedFor:_webServer forType:@"POST"];
@@ -89,7 +86,7 @@ RCT_EXPORT_METHOD(start:(NSInteger) port
         [self initResponseReceivedFor:_webServer forType:@"GET"];
         [self initResponseReceivedFor:_webServer forType:@"DELETE"];
 
-        [_webServer startWithPort:port bonjourName:serviceName];
+        [_webServer startWithPort:(NSUInteger)port bonjourName:serviceName];
     });
 }
 
@@ -105,14 +102,13 @@ RCT_EXPORT_METHOD(stop)
 }
 
 RCT_EXPORT_METHOD(respond: (NSString *) requestId
-                  code: (NSInteger) code
+                  code: (double) code
                   type: (NSString *) type
                   body: (NSString *) body)
 {
-//    NSData* data = [body dataUsingEncoding:NSUTF8StringEncoding];
     NSData* data = [[NSData alloc] initWithBase64EncodedString:body options:NSDataBase64DecodingIgnoreUnknownCharacters];
     GCDWebServerDataResponse* requestResponse = [[GCDWebServerDataResponse alloc] initWithData:data contentType:type];
-    requestResponse.statusCode = code;
+    requestResponse.statusCode = (NSInteger)code;
 
     GCDWebServerCompletionBlock completionBlock = nil;
     @synchronized (self) {
@@ -126,13 +122,10 @@ RCT_EXPORT_METHOD(respond: (NSString *) requestId
     }
 }
 
-// Don't compile this code when we build for the old architecture.
-#ifdef RCT_NEW_ARCH_ENABLED
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
     (const facebook::react::ObjCTurboModule::InitParams &)params
 {
-    return std::make_shared<facebook::react::NativeCacheVideoSpecJSI>(params);
+    return std::make_shared<facebook::react::NativeCacheVideoHttpProxySpecJSI>(params);
 }
-#endif
 
 @end
