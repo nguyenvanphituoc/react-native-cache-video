@@ -8,7 +8,7 @@ export function useVideoInBackGround() {
   const lastVideoPlayingRef = useRef<{
     url: string | undefined;
     index: number | undefined;
-  }>();
+  }>(undefined);
   const { setVideoPlayUrlBy, cachedVideoUrl } = useAsyncCache();
 
   const setPlayListVideo = useCallback(

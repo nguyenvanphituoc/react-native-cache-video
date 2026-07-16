@@ -1,0 +1,12 @@
+{
+  "_readme": "Tier C template (design spec addendum §F.2). Copy to .claude/settings.local.json and edit — that file is gitignored and merges over the committed .claude/settings.json team defaults. Every key under env is optional; omit what you don't want to override. GATE L0.5/L0.8 resolves: /ship flags > settings.local.json (this file) > settings.json (team) > skill-shipped defaults. Model keys degrade one tier down (never hard-fail) when unavailable on your plan (R2). Budget keys are the two-level circuit breaker (DD-9): round_budget is outer (build+eval cycles), attempt_budget is inner (per-scope T0 attempts).",
+  "env": {
+    "SHAPEUP_ORCH_MODEL": "opus",
+    "SHAPEUP_EXEC_MODEL": "sonnet",
+    "SHAPEUP_EVAL_MODEL": "sonnet",
+    "SHAPEUP_QA_MODEL": "haiku",
+    "SHAPEUP_ROUND_BUDGET": "3",
+    "SHAPEUP_ATTEMPT_BUDGET": "5",
+    "SHAPEUP_DIGESTER_MODEL": "script"
+  }
+}

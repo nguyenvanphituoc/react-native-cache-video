@@ -1,6 +1,6 @@
 //
 export interface RequestInterface {
-  requestId: number;
+  requestId: string;
   postData: string;
   type: string;
   url: string;
@@ -11,7 +11,7 @@ export interface RequestInterface {
 }
 
 export interface ResponseInterface {
-  requestId: number;
+  requestId: string;
   closed: boolean;
   send(code: number, type: string, body: string): void;
   json(obj: any, code?: number): void;
@@ -24,10 +24,9 @@ export type CallBackHandler = (
 ) => Promise<object | void>;
 
 export interface HttpServer {
-  multiply(a: number, b: number): Promise<number>;
   start(port: number, serviceName: string): void;
   stop(): void;
-  respond(requestId: number, code: number, type: string, body: string): void;
+  respond(requestId: string, code: number, type: string, body: string): void;
 }
 
 export interface BridgeServerInterface {

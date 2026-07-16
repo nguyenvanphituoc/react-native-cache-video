@@ -1,0 +1,13 @@
+# Expo prebuild output — regenerable via `npx expo prebuild`, never committed.
+/android
+/ios
+/.expo
+expo-env.d.ts
+
+# deps / build
+node_modules/
+.kotlin/
+
+# misc
+*.log
+.DS_Store

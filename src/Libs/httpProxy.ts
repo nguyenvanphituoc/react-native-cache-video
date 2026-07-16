@@ -50,12 +50,12 @@ export const HttpProxy = {
     DeviceEventEmitter.removeAllListeners('httpServerResponseReceived');
   },
 
-  respond: (requestId: number, code: number, type: string, body: string) =>
+  respond: (requestId: string, code: number, type: string, body: string) =>
     CacheVideoHttpProxy.respond(requestId, code, type, body),
 };
 //
 class Request implements RequestInterface {
-  requestId: number;
+  requestId: string;
   postData: string;
   type: string;
   url: string;
@@ -78,10 +78,10 @@ class Request implements RequestInterface {
 }
 
 class Response implements ResponseInterface {
-  requestId: number;
+  requestId: string;
   closed: boolean;
 
-  constructor(requestId: number) {
+  constructor(requestId: string) {
     this.requestId = requestId;
     this.closed = false;
   }

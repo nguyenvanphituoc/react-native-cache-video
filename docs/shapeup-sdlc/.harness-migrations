@@ -1,0 +1,7 @@
+# Harness migration ledger — applied migrations (a DB schema_migrations analogue).
+# Committed on purpose: teammates inherit applied-state on git pull.
+# Columns (tab-separated): id  applied_utc  plugin_version  slug
+0001	2026-07-16T01:37:46Z	1.2.0	per-skill-knowledge-base
+0002	2026-07-16T01:37:46Z	1.2.0	v030-file-organization
+0003	2026-07-16T01:37:46Z	1.2.0	local-tasks-architecture
+0004	2026-07-16T01:37:46Z	1.2.0	pure-skill-architecture
