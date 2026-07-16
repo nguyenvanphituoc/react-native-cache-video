@@ -87,7 +87,7 @@ describe('withRnCacheVideo — Android network security config', () => {
     ).toBe('@xml/host_app_config');
   });
 
-  it('writes an xml scoping cleartext to loopback domains only', async () => {
+  it('writes a main xml scoping cleartext to loopback domains only (production)', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'rncv-nsc-'));
     const applied = withRnCacheVideo(baseConfig());
     await runDangerousMod(applied, tmp);
@@ -110,8 +110,40 @@ describe('withRnCacheVideo — Android network security config', () => {
     expect(xml).toContain(
       '<domain includeSubdomains="false">localhost</domain>'
     );
+    // production must NOT permit cleartext to the emulator dev-server host
+    expect(xml).not.toContain('10.0.2.2');
     // scoped, not a base-config wildcard
     expect(xml).not.toContain('<base-config');
+  });
+
+  it('writes a debug overlay xml adding the Metro dev-server hosts (debug only)', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'rncv-nsc-dbg-'));
+    const applied = withRnCacheVideo(baseConfig());
+    await runDangerousMod(applied, tmp);
+    const xml = await fs.readFile(
+      path.join(
+        tmp,
+        'app',
+        'src',
+        'debug',
+        'res',
+        'xml',
+        'rncachevideo_network_security_config.xml'
+      ),
+      'utf8'
+    );
+    // loopback proxy still allowed...
+    expect(xml).toContain(
+      '<domain includeSubdomains="false">127.0.0.1</domain>'
+    );
+    // ...plus the emulator/Genymotion dev-server aliases so `expo run:android`
+    // can load the JS bundle from Metro (http://10.0.2.2:8081).
+    expect(xml).toContain(
+      '<domain includeSubdomains="false">10.0.2.2</domain>'
+    );
+    expect(xml).toContain(
+      '<domain includeSubdomains="false">10.0.3.2</domain>'
+    );
   });
 
   it('is idempotent — applying the manifest mod twice yields the same attribute', async () => {
