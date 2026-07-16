@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "CacheVideoExpoExample",
+    "slug": "cache-video-expo-example",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "com.cachevideo.expoexample",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.cachevideo.expoexample"
+    },
+    "plugins": [
+      "../app.plugin.js"
+    ]
+  }
+}

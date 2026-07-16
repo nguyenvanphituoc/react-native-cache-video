@@ -60,6 +60,50 @@ with yarn
 yarn add react-native-blob-util react-native-url-polyfill react-native-cache-video
 ```
 
+### Use with Expo
+
+This library ships a **custom TurboModule** (a native localhost HTTP proxy), so it does **not**
+run in **Expo Go**. Use an [Expo Dev Client](https://docs.expo.dev/develop/development-builds/introduction/)
+with prebuild (Continuous Native Generation):
+
+1. Install the library and its peers:
+
+   ```sh
+   npx expo install react-native-cache-video react-native-blob-util react-native-url-polyfill react-native-video
+   ```
+
+2. Add the config plugin to your `app.json` / `app.config.js`:
+
+   ```json
+   {
+     "expo": {
+       "plugins": ["react-native-cache-video"]
+     }
+   }
+   ```
+
+3. Generate the native projects and run a dev build:
+
+   ```sh
+   npx expo prebuild
+   npx expo run:android   # or: npx expo run:ios
+   ```
+
+**What the plugin does** — nothing beyond what the proxy needs, scoped to loopback only:
+
+- **Android:** writes a `network-security-config` that permits cleartext traffic **only** to
+  `127.0.0.1` and `localhost` (no blanket `usesCleartextTraffic`), and points
+  `<application android:networkSecurityConfig>` at it. If your app already declares one, the
+  plugin leaves it untouched and warns.
+- **iOS:** adds an App Transport Security exception (`NSExceptionAllowsInsecureHTTPLoads`) for
+  `localhost` / `127.0.0.1` only — it does **not** set `NSAllowsArbitraryLoads`.
+
+The TurboModule itself links through standard React Native autolinking, which `expo prebuild`
+respects — the plugin adds no autolinking glue.
+
+> A complete, runnable sample lives in [`example-expo/`](./example-expo) (Expo SDK 54, new
+> architecture, dev-client).
+
 ## Usage
 
 Support play with [react-native-video](https://github.com/react-native-video/react-native-video.git)

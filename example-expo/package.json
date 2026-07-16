@@ -1,0 +1,26 @@
+{
+  "name": "react-native-cache-video-example-expo",
+  "version": "0.0.1",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild": "expo prebuild --clean"
+  },
+  "dependencies": {
+    "expo": "54.0.36",
+    "react": "19.1.0",
+    "react-native": "0.81.4",
+    "react-native-blob-util": "^0.24.10",
+    "react-native-cache-video": "*",
+    "react-native-url-polyfill": "^2.0.0",
+    "react-native-video": "^6.19.2"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "~19.1.0",
+    "typescript": "~5.9.2"
+  }
+}
