@@ -14,10 +14,20 @@ import { isMemoryCachePolicyInterface } from '../user-defined-guard';
  *  Note: passing undefined as a Provider value does not cause consuming components to use defaultValue.
  *  "
  */
+// N8 provider-missing marker (issue #8, round-ledger D5 — non-breaking): the
+// default context still carries a REAL CacheManager so consumers that rely on
+// it keep working, but the marker lets reverseProxyURL name PROVIDER_MISSING
+// instead of a generic warning when no <CacheManagerProvider> is mounted.
+const defaultContextCacheManager = new CacheManager(
+  'react-native-cache-video',
+  __DEV__
+);
+defaultContextCacheManager.isDefaultContext = true;
+
 export const CacheManagerContext = createContext<{
   cacheManager: CacheManager;
 }>({
-  cacheManager: new CacheManager('react-native-cache-video', __DEV__),
+  cacheManager: defaultContextCacheManager,
 });
 CacheManagerContext.displayName = Symbol('CacheManagerContext').toString();
 
@@ -62,7 +72,9 @@ export const CacheManagerProvider = ({
       // bound port, never a timer-guessed one (UC-ObserveReadiness INV-03).
       server.enableBridgeServer(port).catch(() => {});
     } else if (!isForeground) {
-      server.disableBridgeServer();
+      // named stop cause → reverseProxyURL warns APP_BACKGROUNDED, not the
+      // generic not-started reason (UC-ResolvePlaybackUrl step 3, issue #8)
+      server.disableBridgeServer('backgrounded');
     }
 
     return () => {

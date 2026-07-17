@@ -10,6 +10,7 @@ import type {
   MemoryCachePolicyInterface,
 } from './types/type';
 import {
+  FALLBACK_WARNINGS,
   HLS_CACHING_RESTART,
   HLS_CONTENT_TYPE,
   HLS_VIDEO_TYPE,
@@ -19,6 +20,7 @@ import {
   SIGNAL_NOT_DOWNLOAD_ACTION,
   // VIDEO_EXTENSIONS,
 } from './Utils/constants';
+import type { FallbackReason } from './Utils/constants';
 
 // UC-StartCacheServer S1 — the single server-lifecycle truth. `port` is
 // non-null iff status === 'ready' (native start confirmed the bind).
@@ -131,7 +133,17 @@ export class CacheManager
   // Enable-cycle token: results settling for a superseded cycle are ignored
   // (RH4 churn guard — UC-StartCacheServer INV-04).
   private _enableCycle = 0;
+  // True iff the last disable was the app-backgrounded stop (provider's
+  // !isForeground branch) — lets reverseProxyURL name APP_BACKGROUNDED
+  // instead of the generic not-started cause (UC-ResolvePlaybackUrl step 3).
+  private _stoppedByBackground = false;
   private _memoryCache?: MemoryCacheInterface<string>;
+
+  // N8 provider-missing guard (issue #8, round-ledger D5): true ONLY on the
+  // module-default context instance in useProxyCacheProvider — a non-breaking
+  // marker (the default manager keeps working for consumers that rely on it),
+  // so reverseProxyURL can name PROVIDER_MISSING as the fallback cause.
+  isDefaultContext = false;
   //
   constructor(
     serverName: string,
@@ -431,6 +443,7 @@ export class CacheManager
    */
   async enableBridgeServer(port: number): Promise<void> {
     const cycle = ++this._enableCycle;
+    this._stoppedByBackground = false;
     this.setServerState({ status: 'starting', port: null });
     //
     this.addRequestHandlers();
@@ -477,9 +490,15 @@ export class CacheManager
     throw lastError;
   }
 
-  disableBridgeServer() {
+  /**
+   * Stop the bridge server. `cause: 'backgrounded'` is passed by the
+   * provider's app-backgrounded branch so the next reverseProxyURL fallback
+   * can name APP_BACKGROUNDED; any other stop resets that marker.
+   */
+  disableBridgeServer(cause?: 'backgrounded') {
     // invalidate any in-flight start: its late result must be ignored (RH4)
     this._enableCycle++;
+    this._stoppedByBackground = cause === 'backgrounded';
     this.setServerState({ status: 'idle', port: null });
     this._bridgeServer?.stop();
     //
@@ -489,14 +508,54 @@ export class CacheManager
     this.saveCacheToStorage();
   }
 
-  reverseProxyURL(forUrl: string) {
-    if (!forUrl.startsWith('http') || !this.runningPort || !isHLSUrl(forUrl)) {
-      console.warn(
-        'reverseProxyURL: invalid url or port.\nShould check if bridge server is running and has been used CDN url start with http protocol.'
-      );
-      return forUrl;
+  /**
+   * UC-ResolvePlaybackUrl (issue #8): ALWAYS returns a playable string — the
+   * cache-proxied URL when the server is ready and the URL is a proxyable HLS
+   * playlist, otherwise the ORIGINAL url plus exactly ONE console warning
+   * naming the actual cause (INV-01/INV-02; the generic "invalid url or
+   * port" is retired). Never throws, never returns null.
+   */
+  reverseProxyURL(forUrl: string): string {
+    // 1. N8 guard: reached through the module-default context — no
+    //    <CacheManagerProvider> is mounted above the caller.
+    if (this.isDefaultContext) {
+      return this.fallbackToOrigin(forUrl, 'PROVIDER_MISSING');
     }
-    return reverseProxyURL(forUrl, this.runningPort);
+    // 2. Only http(s) URLs can be proxied (non-string input degrades to the
+    //    same defined fallback — TS-REQ-url-missing, no crash).
+    if (typeof forUrl !== 'string' || !/^https?:\/\//i.test(forUrl)) {
+      return this.fallbackToOrigin(forUrl, 'INVALID_URL');
+    }
+    // 3. S1 read — every non-ready status names its cause.
+    const { status, port } = this._serverState;
+    if (status === 'failed') {
+      return this.fallbackToOrigin(forUrl, 'SERVER_START_FAILED');
+    }
+    if (status !== 'ready') {
+      return this.fallbackToOrigin(
+        forUrl,
+        this._stoppedByBackground ? 'APP_BACKGROUNDED' : 'SERVER_NOT_STARTED'
+      );
+    }
+    // 4/5. ready: proxy HLS playlists; anything else — including an
+    //      http-prefixed string the URL parser rejects — still returns the
+    //      original url (INV-01: playback never breaks).
+    try {
+      if (!isHLSUrl(forUrl)) {
+        return this.fallbackToOrigin(forUrl, 'UNSUPPORTED_URL');
+      }
+      return reverseProxyURL(forUrl, port!);
+    } catch (_error) {
+      return this.fallbackToOrigin(forUrl, 'INVALID_URL');
+    }
+  }
+
+  // Every fallback is observable (ConsoleSurface RULE-07): exactly one
+  // reasoned warning per fallback event, then the original url unchanged —
+  // no code path returns the origin URL silently (INV-02).
+  private fallbackToOrigin(forUrl: string, reason: FallbackReason): string {
+    console.warn(FALLBACK_WARNINGS[reason]);
+    return forUrl;
   }
   // ======= playlist parser
   private addRequestHandlers() {
