@@ -8,6 +8,7 @@ import type {
 // Contract source of truth for the native seam (result-bearing start):
 // docs/shapeup-sdlc/fix-core-caching-bugs/spec/contracts/native-start.contract.md
 import type { Spec as HttpServerSpec } from '../NativeCacheVideoHttpProxy';
+import { MAX_PORT, MIN_PORT } from '../Utils/constants';
 
 const LINKING_ERROR =
   `The package 'react-native-cache-video' doesn't seem to be linked. Make sure: \n\n` +
@@ -41,6 +42,10 @@ export const HttpProxy = {
   ): Promise<number> => {
     if (port === 80) {
       throw new Error('Invalid server port specified. Port 80 is reserved.');
+    }
+    // Contract #Request: serviceName is REQUIRED, non-empty.
+    if (!serviceName) {
+      throw new Error('Invalid service name');
     }
 
     // Register the request listener BEFORE the bind settles so requests that
@@ -176,8 +181,14 @@ export class BridgeServer implements BridgeServerInterface {
       // legacy no-op semantics preserved: report the port already bound
       return this.boundPort as number;
     }
-    if (port < 0 || port > 65535) {
-      throw new Error('Invalid port number');
+    // Contract #Request bounds (native-start.contract.md): port is REQUIRED,
+    // an integer in the ephemeral range 49152-65535 — reject BEFORE any
+    // native call (UC-StartCacheServer TS-REQ-port-boundary/-missing).
+    // Throwing inside this async method rejects the returned promise.
+    if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) {
+      throw new Error(
+        `Invalid server port specified. Expected an integer in ${MIN_PORT}-${MAX_PORT}, got ${String(port)}.`
+      );
     }
 
     const result = await HttpProxy.start(

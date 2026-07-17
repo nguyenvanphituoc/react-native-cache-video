@@ -27,3 +27,10 @@ Budgets: round_budget=2 (outer) · attempt_budget=5 (inner, per scope) · auto=-
 
 | scope | r1 phase | notes |
 |---|---|---|
+| regression-net | DOWNHILL_EXECUTION | T0 🟢 a1; T1 no findings against it |
+| verified-cache-pipeline | DOWNHILL_EXECUTION | T0 🟢 a1 (re-verify post-D6); T1 FAIL: BUG-2 (scheme guard), BUG-3 (discard unobservable) |
+| server-start-truth | DOWNHILL_EXECUTION | T0 🟢 a1; T1 FAIL: BUG-1 major (port validation TS-REQ rows); Android assembleDebug ✅ local |
+| readiness-observation | DOWNHILL_EXECUTION | T0 🟢 a1; T1 no findings against it |
+| reasoned-fallback | DOWNHILL_EXECUTION | T0 🟢 a1; T1 no findings against it |
+
+EVAL r1: FAIL — 41/45 criteria, 3 bugs; headline #8/#6/#5 behaviors probed green by the judge.

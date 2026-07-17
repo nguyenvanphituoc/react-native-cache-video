@@ -7,10 +7,13 @@
  * cycle are ignored (INV-04 / RH4 StrictMode churn).
  *
  * Covers UC-StartCacheServer TS-INV-01 and TS-INV-04, plus the TASK-002 AC
- * that HttpProxy.start propagates the native promise.
+ * that HttpProxy.start propagates the native promise, and the TS-REQ rows
+ * (port-boundary, port-missing, serviceName-missing) — contract #Request
+ * bounds enforced at the seam before any native call (round-2 BUG-1).
  */
 import { CacheManager } from '../ProxyCacheManager';
-import { HttpProxy } from '../Libs/httpProxy';
+import { BridgeServer, HttpProxy } from '../Libs/httpProxy';
+import { MAX_PORT, MIN_PORT } from '../Utils/constants';
 import { resetTestHarness } from '../__mock__/harness';
 import NativeProxyMock from '../__mock__/native-cache-video-http-proxy';
 
@@ -47,6 +50,67 @@ describe('server-start: HttpProxy.start propagates the native promise (TASK-002)
     expect(() => HttpProxy.start(80, 'svc', () => {})).toThrow(
       'Port 80 is reserved'
     );
+    expect(NativeProxyMock.start).not.toHaveBeenCalled();
+  });
+});
+
+describe('server-start: contract #Request validation at the native seam (TS-REQ)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+  });
+
+  it('TS-REQ-port-boundary: in-range edges 49152 and 65535 are accepted and passed to native', async () => {
+    NativeProxyMock.__setStartResult(MIN_PORT);
+    await expect(
+      new BridgeServer('bug1-boundary', true).listen(MIN_PORT)
+    ).resolves.toBe(MIN_PORT);
+    expect(NativeProxyMock.start).toHaveBeenCalledWith(
+      MIN_PORT,
+      'bug1-boundary'
+    );
+
+    NativeProxyMock.__setStartResult(MAX_PORT);
+    await expect(
+      new BridgeServer('bug1-boundary', true).listen(MAX_PORT)
+    ).resolves.toBe(MAX_PORT);
+    expect(NativeProxyMock.start).toHaveBeenCalledWith(
+      MAX_PORT,
+      'bug1-boundary'
+    );
+  });
+
+  it('TS-REQ-port-boundary: out-of-range 49151 and 65536 are rejected before the native call', async () => {
+    // eval-report repro shape: BridgeServer.listen(49151) must reject
+    await expect(
+      new BridgeServer('bug1-boundary', true).listen(MIN_PORT - 1)
+    ).rejects.toThrow('Invalid server port');
+    await expect(
+      new BridgeServer('bug1-boundary', true).listen(MAX_PORT + 1)
+    ).rejects.toThrow('Invalid server port');
+
+    expect(NativeProxyMock.start).not.toHaveBeenCalled();
+  });
+
+  it('TS-REQ-port-missing: undefined (and non-integer) port → validation error, no native call side effect', async () => {
+    // eval-report repro shape: BridgeServer.listen(undefined) must reject
+    await expect(
+      new BridgeServer('bug1-missing', true).listen(undefined as any)
+    ).rejects.toThrow('Invalid server port');
+    await expect(
+      new BridgeServer('bug1-missing', true).listen(50123.5)
+    ).rejects.toThrow('Invalid server port');
+
+    expect(NativeProxyMock.start).not.toHaveBeenCalled();
+  });
+
+  it('TS-REQ-serviceName-missing: empty serviceName → validation error, no native call', () => {
+    // seam level: contract #Request requires a non-empty serviceName
+    expect(() => HttpProxy.start(PORT, '', () => {})).toThrow(
+      'Invalid service name'
+    );
+    // plumbing level: BridgeServer refuses to exist without a service name
+    expect(() => new BridgeServer('', true)).toThrow('Invalid service name');
+
     expect(NativeProxyMock.start).not.toHaveBeenCalled();
   });
 });
