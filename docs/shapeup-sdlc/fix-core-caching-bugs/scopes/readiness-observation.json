@@ -29,8 +29,10 @@
   ],
   "e2e_verification_fixtures": [
     "yarn test --testPathPattern 'issue-6-late-subscriber|readiness'",
-    "yarn typecheck",
-    "TBD(simulator): visual pass of the U2 indicator in example/ (RULE-01..04) is a manual PO/QA check at ship — no browser/simulator oracle available to T0 (example-expo indicator hammered out at GATE L1b D3)"
+    "yarn typecheck"
+  ],
+  "manual_checks": [
+    "TBD(simulator): visual pass of the U2 indicator in example/ (RULE-01..04) is a manual PO/QA check at ship — no browser/simulator oracle available to T0 (example-expo indicator hammered out at GATE L1b D3; not executable by t0-verify)"
   ],
   "hill_phase": "UPHILL_UNKNOWN"
 }

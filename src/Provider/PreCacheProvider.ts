@@ -5,8 +5,33 @@ import type {
 } from '../types/type';
 import { KEY_PREFIX, SIGNAL_NOT_DOWNLOAD_ACTION } from '../Utils/constants';
 import { cacheKey, getCacheKey, isHLSUrl, isMediaUrl } from '../Utils/util';
+import { FileSystemManager, tempCachePathFor } from '../Libs/fileSystem';
 
 import type { FetchBlobResponse, StatefulPromise } from '../Libs/session';
+
+// HTTP/2 origins deliver lowercase header names (same rationale as
+// contentTypeOf in ProxyCacheManager). Returns null when Content-Length is
+// absent or unparsable — the "not verifiable" signal (chunked transfer).
+// Number() keeps full double precision, so sizes stay exact far beyond 1GB
+// (Number.MAX_SAFE_INTEGER ≈ 9PB) — no 32-bit truncation.
+function contentLengthOf(headers?: {
+  [key in string]?: string;
+}): number | null {
+  if (!headers) {
+    return null;
+  }
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'content-length') {
+      const raw = headers[key];
+      if (raw === undefined || raw === null || String(raw).trim() === '') {
+        return null;
+      }
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+  }
+  return null;
+}
 
 export class PreCacheProvider implements PreCacheInterface {
   private isRunningThread = false;
@@ -18,6 +43,8 @@ export class PreCacheProvider implements PreCacheInterface {
     {};
   // support for re-cache if need
   private errorCachingList: { [key in string]?: string } = {};
+  // verify (stat) + promote (mv) + discard (unlink) for the verified write path
+  private storage = new FileSystemManager();
   //
   delegate?: PreCacheDelegate;
   sessionTask: SessionTaskInterface;
@@ -158,31 +185,58 @@ export class PreCacheProvider implements PreCacheInterface {
     return Promise.resolve();
   }
 
+  // Verified write path (issue #5): download to a TEMP path, verify size
+  // against Content-Length, atomically promote temp → final, register LAST.
+  // Anything unverified is discarded — the final cache path is never touched.
   private async prepareSourceMedia(url: string): Promise<string> {
-    const { originURL, cacheKey: prepareCacheKey } = getCacheKey(
+    const { originURL, cacheKey: finalCachePath } = getCacheKey(
       url,
       this.cacheFolder,
       KEY_PREFIX
     );
+    // temp-suffix convention (see Libs/fileSystem): marks "unverified",
+    // survives process death
+    const tempCachePath = tempCachePathFor(finalCachePath);
     try {
-      // start download
+      // start download — direct-to-disk to the TEMP path, never the final path
       const httpRequest = this.sessionTask.dataTask(originURL.href, {
         overwrite: true,
         fileCache: true,
-        path: prepareCacheKey,
+        path: tempCachePath,
       });
 
       // mark it as downloading
+      // NOTE: no cache registration here — an entry exists only after
+      // verify + promote (UC-CacheLargeFile INV-01)
       this.cachingUrl[originURL.href] = httpRequest;
 
-      // update to cached list
+      const response = await httpRequest;
+
+      const expectedSize = contentLengthOf(response?.respInfo?.headers);
+      if (expectedSize === null) {
+        // NO_CONTENT_LENGTH (chunked transfer): not verifiable —
+        // conservative policy: discard temp, register nothing
+        await this.discardTempFile(tempCachePath);
+        return originURL.href;
+      }
+
+      const stat = await this.storage.getStatistic(tempCachePath);
+      const actualSize = Number(stat?.size);
+      if (actualSize !== expectedSize) {
+        // SIZE_MISMATCH: incomplete/corrupt download — discard temp,
+        // record for re-cache, final path untouched
+        await this.discardTempFile(tempCachePath);
+        this.errorCachingList[originURL.href] = finalCachePath;
+        return originURL.href;
+      }
+
+      // verified: atomic promote temp → final, then (and only then) register
+      await this.storage.moveFile(tempCachePath, finalCachePath);
       this.delegate?.onCachingPlaylistSource(
         originURL.href,
         null,
         this.cacheFolder
       );
-
-      await httpRequest;
 
       if (this.errorCachingList[originURL.href]) {
         delete this.errorCachingList[originURL.href];
@@ -190,11 +244,21 @@ export class PreCacheProvider implements PreCacheInterface {
 
       return originURL.href;
     } catch (error) {
-      // maybe cancel case
-      this.errorCachingList[originURL.href] = prepareCacheKey;
+      // DOWNLOAD_FAILED: network error or cancellation — discard temp,
+      // record for re-cache, final path untouched
+      await this.discardTempFile(tempCachePath);
+      this.errorCachingList[originURL.href] = finalCachePath;
       return originURL.href;
     } finally {
       delete this.cachingUrl[originURL.href];
+    }
+  }
+
+  private async discardTempFile(tempPath: string) {
+    try {
+      await this.storage.unlinkFile(tempPath);
+    } catch (error) {
+      // temp never materialized (e.g. request failed before first byte)
     }
   }
   // - MARK: Utils

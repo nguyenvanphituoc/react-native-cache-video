@@ -2,11 +2,11 @@
   "schema_version": 1,
   "round": 1,
   "attempt": 1,
-  "at": "2026-07-17T09:37:24.974Z",
-  "scope_id": "verified-cache-pipeline",
+  "at": "2026-07-17T09:15:15.646Z",
+  "scope_id": "regression-net",
   "fixtures": [
     {
-      "cmd": "yarn test --testPathPattern 'issue-5-incomplete-file|verified-cache|serve-guard'",
+      "cmd": "yarn test",
       "exit": 0,
       "pass": true
     },

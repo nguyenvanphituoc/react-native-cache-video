@@ -18,8 +18,10 @@
   "affordance_manifest": [],
   "e2e_verification_fixtures": [
     "yarn test --testPathPattern 'issue-5-incomplete-file|verified-cache|serve-guard'",
-    "yarn typecheck",
-    "TBD(manual): ~500MB mp4 cache/replay/interrupt demo (breadboard V4 demo) needs a real device/simulator + CDN — manual PO/QA check at ship, not a jest fixture"
+    "yarn typecheck"
+  ],
+  "manual_checks": [
+    "TBD(manual): ~500MB mp4 cache/replay/interrupt demo (breadboard V4 demo) needs a real device/simulator + CDN — manual PO/QA check at ship, not a jest fixture (not executable by t0-verify)"
   ],
   "hill_phase": "UPHILL_UNKNOWN"
 }

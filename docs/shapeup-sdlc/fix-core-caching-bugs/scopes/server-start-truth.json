@@ -26,8 +26,10 @@
   "e2e_verification_fixtures": [
     "yarn test --testPathPattern 'server-start|port-retry'",
     "yarn typecheck",
-    "node node_modules/react-native/scripts/generate-codegen-artifacts.js -p . -t all -o ./build/codegen-check",
-    "TBD(native-build): example/ios pod install + Xcode build and example/android gradlew assembleDebug are TASK-003/TASK-004 AC but run in CI (build-ios workflow) / manual — too heavy for per-attempt T0 on this machine"
+    "node node_modules/react-native/scripts/generate-codegen-artifacts.js -p . -t all -o ./build/codegen-check"
+  ],
+  "manual_checks": [
+    "TBD(native-build): example/ios pod install + Xcode build and example/android gradlew assembleDebug are TASK-003/TASK-004 AC but run in CI (build-ios workflow) / manual — too heavy for per-attempt T0 on this machine; PO/QA + CI at ship (not executable by t0-verify)"
   ],
   "hill_phase": "UPHILL_UNKNOWN"
 }

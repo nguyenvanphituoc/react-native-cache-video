@@ -32,7 +32,12 @@ function contentTypeOf(
   return fallback;
 }
 
-import { FileBucket, FileSystemManager } from './Libs/fileSystem';
+import {
+  FileBucket,
+  FileSystemManager,
+  isTempCachePath,
+  tempCachePathFor,
+} from './Libs/fileSystem';
 import { SimpleSessionProvider, type Encoding } from './Libs/session';
 import {
   absoluteFilePath,
@@ -116,10 +121,26 @@ export class CacheManager
     return this._memoryCache?.get(key);
   }
 
+  // Serve-guard (issue #5 read side): only VERIFIED entries are ever served.
+  // Registration implies verified (UC-CacheLargeFile INV-01); on-disk files
+  // carrying the temp/unverified suffix are deleted, never resurrected.
+  // `undefined` is the documented "cache miss — play the origin URL" signal
+  // consumed by useAsyncCache; a dangling local path is never returned.
   async getCachedFileAsync(
     url: string,
     folder: string = this.cacheFolder
   ): Promise<string | undefined> {
+    // no url → defined no-op: caller keeps its (missing) origin source
+    if (!url) {
+      return undefined;
+    }
+
+    const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
+      url,
+      folder,
+      KEY_PREFIX
+    );
+
     // Check memory cache first
     const cachedKey = this.getCachedFile(url);
     if (cachedKey) {
@@ -127,23 +148,32 @@ export class CacheManager
       if (await this._storage.existsFile(cachedKey)) {
         return cachedKey;
       } else {
-        // File missing - clean up cache entries
-        this._memoryCache?.syncCache(url);
+        // STALE_ENTRY: registered but file gone — evict, degrade to origin
+        this._memoryCache?.syncCache(originURL.href);
         return undefined;
       }
     }
 
-    // access cache in file system
-    const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
-      url,
-      folder,
-      KEY_PREFIX
-    );
-    if (await this._storage.existsFile(cacheKeyStr)) {
-      this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
-      this.getCachedFile(originURL.href);
-      return cacheKeyStr;
+    // Filesystem fallback — registry lost (e.g. app restart). Only files at
+    // the FINAL cache path were verified in a previous session and may be
+    // re-registered; a temp-convention path is never served.
+    if (!isTempCachePath(cacheKeyStr)) {
+      if (await this._storage.existsFile(cacheKeyStr)) {
+        this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
+        this.getCachedFile(originURL.href);
+        return cacheKeyStr;
+      }
     }
+
+    // UNVERIFIED_ENTRY: an orphaned temp-suffix partial (killed session) is
+    // deleted so it can never be resurrected — request degrades to origin
+    const orphanTempPath = isTempCachePath(cacheKeyStr)
+      ? cacheKeyStr
+      : tempCachePathFor(cacheKeyStr);
+    if (await this._storage.existsFile(orphanTempPath)) {
+      await this._storage.unlinkFile(orphanTempPath);
+    }
+
     // remove reference if need
     this._memoryCache?.syncCache(originURL.href);
 
