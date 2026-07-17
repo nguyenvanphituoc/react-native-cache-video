@@ -1,3 +1,5 @@
+import { DeviceEventEmitter } from 'react-native';
+
 import type {
   PreCacheDelegate,
   PreCacheInterface,
@@ -32,6 +34,21 @@ function contentLengthOf(headers?: {
   }
   return null;
 }
+
+// UC-CacheLargeFile steps 4/6 + domain-model#Domain-Events: observable
+// CacheEntryDiscarded signal (payload {key, reason}, consumers
+// logging/diagnostics). Emitted whenever a temp file is discarded for a
+// verification failure — mirrors the SERVER_START_FAILED_EVENT pattern
+// (RNCV_* DeviceEventEmitter convention). Defined here (not in
+// Utils/constants.ts) because this scope's substrate owns only this file.
+// The verified-side CacheEntryVerified event stays realized by registration
+// (onCachingPlaylistSource), its declared consumer.
+export const CACHE_ENTRY_DISCARDED_EVENT = 'RNCV_CACHE_ENTRY_DISCARDED';
+
+export type CacheEntryDiscardReason =
+  | 'SIZE_MISMATCH'
+  | 'DOWNLOAD_FAILED'
+  | 'NO_CONTENT_LENGTH';
 
 export class PreCacheProvider implements PreCacheInterface {
   private isRunningThread = false;
@@ -135,6 +152,17 @@ export class PreCacheProvider implements PreCacheInterface {
   }
 
   async preCacheFor(url: string): Promise<string> {
+    // UC-CacheLargeFile TS-REQ-url-missing: only http(s) URLs are cacheable.
+    // Missing/non-string/non-http(s) input is a defined no-op — no network,
+    // no filesystem touch, no errorCachingList entry (mirror of the
+    // reverseProxyURL scheme guard in ProxyCacheManager). Also guards the
+    // `new URL(undefined)` crash inside isHLSUrl/isMediaUrl.
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+      console.warn(
+        'preCacheFor [UNSUPPORTED_URL]: only http(s) urls can be pre-cached — no-op'
+      );
+      return url;
+    }
     // detect stream or not
     if (isHLSUrl(url)) {
       // return this.prepareSourceStream(url);
@@ -216,7 +244,11 @@ export class PreCacheProvider implements PreCacheInterface {
       if (expectedSize === null) {
         // NO_CONTENT_LENGTH (chunked transfer): not verifiable —
         // conservative policy: discard temp, register nothing
-        await this.discardTempFile(tempCachePath);
+        await this.discardTempFile(
+          tempCachePath,
+          originURL.href,
+          'NO_CONTENT_LENGTH'
+        );
         return originURL.href;
       }
 
@@ -225,7 +257,11 @@ export class PreCacheProvider implements PreCacheInterface {
       if (actualSize !== expectedSize) {
         // SIZE_MISMATCH: incomplete/corrupt download — discard temp,
         // record for re-cache, final path untouched
-        await this.discardTempFile(tempCachePath);
+        await this.discardTempFile(
+          tempCachePath,
+          originURL.href,
+          'SIZE_MISMATCH'
+        );
         this.errorCachingList[originURL.href] = finalCachePath;
         return originURL.href;
       }
@@ -246,7 +282,11 @@ export class PreCacheProvider implements PreCacheInterface {
     } catch (error) {
       // DOWNLOAD_FAILED: network error or cancellation — discard temp,
       // record for re-cache, final path untouched
-      await this.discardTempFile(tempCachePath);
+      await this.discardTempFile(
+        tempCachePath,
+        originURL.href,
+        'DOWNLOAD_FAILED'
+      );
       this.errorCachingList[originURL.href] = finalCachePath;
       return originURL.href;
     } finally {
@@ -254,12 +294,21 @@ export class PreCacheProvider implements PreCacheInterface {
     }
   }
 
-  private async discardTempFile(tempPath: string) {
+  // Discard a temp file that failed verification and emit the observable
+  // CacheEntryDiscarded signal (UC-CacheLargeFile steps 4/6). The event marks
+  // the discard DECISION, so it fires even when the temp never materialized
+  // (e.g. request failed before first byte).
+  private async discardTempFile(
+    tempPath: string,
+    key: string,
+    reason: CacheEntryDiscardReason
+  ) {
     try {
       await this.storage.unlinkFile(tempPath);
     } catch (error) {
       // temp never materialized (e.g. request failed before first byte)
     }
+    DeviceEventEmitter.emit(CACHE_ENTRY_DISCARDED_EVENT, { key, reason });
   }
   // - MARK: Utils
   // END: Utils
