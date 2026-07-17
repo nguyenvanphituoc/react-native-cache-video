@@ -3,6 +3,7 @@ package com.cachevideo
 import android.util.Log
 import com.cachevideo.httpServer.Server
 import com.facebook.react.bridge.LifecycleEventListener
+import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.module.annotations.ReactModule
 import java.io.IOException
@@ -15,11 +16,29 @@ class CacheVideoHttpProxyModule(private val reactContext: ReactApplicationContex
     reactContext.addLifecycleEventListener(this)
   }
 
-  override fun start(port: Double, serviceName: String) {
+  // Matches the codegen spec `void start(double, String, Promise)` — the
+  // generated spec class is a plain ReactContextBaseJavaModule, so this same
+  // implementation serves both old and new architecture (spike-proven).
+  // Resolves with the bound port (NanoHTTPD binds synchronously) or rejects
+  // PORT_BIND_FAILED with the IOException reason — never log-and-continue.
+  override fun start(port: Double, serviceName: String, promise: Promise) {
     Log.d(NAME, "Initializing server...")
-    Companion.port = port.toInt()
 
-    startServer()
+    // Retry choreography: a live instance is stopped first so a repeat start
+    // on a fresh port can never silently no-op (issue #8 root).
+    stopServer()
+
+    val requestedPort = port.toInt()
+    Companion.port = requestedPort
+    server = Server(reactContext, requestedPort)
+    try {
+      server?.start()
+      promise.resolve(requestedPort)
+    } catch (e: IOException) {
+      // release the half-started instance; NanoHTTPD.stop() is null-safe
+      stopServer()
+      promise.reject("PORT_BIND_FAILED", e.message ?: "failed to start server", e)
+    }
   }
 
   override fun stop() {
@@ -44,21 +63,6 @@ class CacheVideoHttpProxyModule(private val reactContext: ReactApplicationContex
 
   override fun onHostDestroy() {
     stopServer()
-  }
-
-  private fun startServer() {
-    if (port == 0) {
-      return
-    }
-
-    if (server == null) {
-      server = Server(reactContext, port)
-    }
-    try {
-      server?.start()
-    } catch (e: IOException) {
-      Log.e(NAME, e.message ?: "failed to start server")
-    }
   }
 
   private fun stopServer() {

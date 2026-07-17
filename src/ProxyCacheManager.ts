@@ -1,9 +1,10 @@
+import { DeviceEventEmitter } from 'react-native';
 import type {
   SessionTaskInterface,
   PreCacheDelegate,
   MemoryCacheInterface,
   MemoryCacheDelegate,
-  BridgeServerInterface,
+  RequestInterface,
   ResponseInterface,
   PreCacheInterface,
   MemoryCachePolicyInterface,
@@ -12,9 +13,19 @@ import {
   HLS_CONTENT_TYPE,
   HLS_VIDEO_TYPE,
   KEY_PREFIX,
+  MAX_START_RETRIES,
+  SERVER_START_FAILED_EVENT,
   SIGNAL_NOT_DOWNLOAD_ACTION,
   // VIDEO_EXTENSIONS,
 } from './Utils/constants';
+
+// UC-StartCacheServer S1 — the single server-lifecycle truth. `port` is
+// non-null iff status === 'ready' (native start confirmed the bind).
+export type ServerStatus = 'idle' | 'starting' | 'ready' | 'failed';
+export interface ServerState {
+  status: ServerStatus;
+  port: number | null;
+}
 
 // HTTP/2 origins deliver lowercase header names; a bare ['Content-Type'] lookup
 // sends undefined over the bridge as the respond() type param (INV-08).
@@ -45,6 +56,7 @@ import {
   getCacheKey,
   getOriginURL,
   isHLSUrl,
+  portGenerate,
   reverseProxyPlaylist,
   reverseProxyURL,
 } from './Utils/util';
@@ -59,10 +71,15 @@ export class CacheManager
   //
   private _sessionTask: SessionTaskInterface;
   private _storage: FileSystemManager;
-  private _bridgeServer: BridgeServerInterface;
+  private _bridgeServer: BridgeServer;
   private _preCache: PreCacheInterface;
   //
-  private runningPort?: number;
+  // S1: single server-lifecycle truth, driven ONLY by the settled native
+  // start/stop result (UC-StartCacheServer INV-01).
+  private _serverState: ServerState = { status: 'idle', port: null };
+  // Enable-cycle token: results settling for a superseded cycle are ignored
+  // (RH4 churn guard — UC-StartCacheServer INV-04).
+  private _enableCycle = 0;
   private _memoryCache?: MemoryCacheInterface<string>;
   //
   constructor(
@@ -85,6 +102,20 @@ export class CacheManager
 
   get sessionTask() {
     return this._sessionTask;
+  }
+
+  // Readable S1 (UC-StartCacheServer): consumers observe the server lifecycle
+  // through this single state — never through optimistic flags.
+  get serverState(): ServerState {
+    return this._serverState;
+  }
+
+  // Derived from S1: defined iff the native start confirmed the bind, so it
+  // can never be non-null outside 'ready'.
+  private get runningPort(): number | undefined {
+    return this._serverState.status === 'ready'
+      ? this._serverState.port ?? undefined
+      : undefined;
   }
 
   get localFileUrl(): string {
@@ -327,18 +358,65 @@ export class CacheManager
   // END: PreCacheDelegate
 
   // - MARK: BridgeServer
-  enableBridgeServer(port: number) {
-    //
-    this.runningPort = port;
-    this._bridgeServer.listen(port);
+  /**
+   * Start the bridge server and reflect the NATIVE truth in serverState:
+   * 'ready' only after the native start promise resolved with a bound port,
+   * retrying up to MAX_START_RETRIES total attempts on fresh random ports,
+   * 'failed' (+ ServerStartFailed notification) after the last rejection
+   * (UC-StartCacheServer steps 2-6).
+   */
+  async enableBridgeServer(port: number): Promise<void> {
+    const cycle = ++this._enableCycle;
+    this._serverState = { status: 'starting', port: null };
     //
     this.addRequestHandlers();
-    //
-    this.loadCacheFromStorage();
+    // A missing cache-registry file must not kill server start (read side
+    // degrades to an empty registry).
+    this.loadCacheFromStorage().catch(() => {});
+
+    const attemptedPorts: number[] = [];
+    let attemptPort = port;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= MAX_START_RETRIES; attempt++) {
+      attemptedPorts.push(attemptPort);
+      try {
+        const boundPort = await this._bridgeServer.listen(attemptPort);
+        if (cycle !== this._enableCycle) {
+          // stale success of a cancelled cycle (disable already ran) — ignore
+          return;
+        }
+        this._serverState = { status: 'ready', port: boundPort };
+        return;
+      } catch (error) {
+        if (cycle !== this._enableCycle) {
+          // stale failure of a cancelled cycle — ignore, don't touch state
+          return;
+        }
+        lastError = error;
+        // stop any half-started native server before the next attempt
+        this._bridgeServer.stop();
+        if (attempt < MAX_START_RETRIES) {
+          // fresh random port (49152-65535), distinct from every failed one
+          do {
+            attemptPort = portGenerate();
+          } while (attemptedPorts.includes(attemptPort));
+        }
+      }
+    }
+
+    this._serverState = { status: 'failed', port: null };
+    DeviceEventEmitter.emit(SERVER_START_FAILED_EVENT, {
+      reason: lastError instanceof Error ? lastError.message : `${lastError}`,
+      attempts: MAX_START_RETRIES,
+    });
+    throw lastError;
   }
 
   disableBridgeServer() {
-    this.runningPort = undefined;
+    // invalidate any in-flight start: its late result must be ignored (RH4)
+    this._enableCycle++;
+    this._serverState = { status: 'idle', port: null };
     this._bridgeServer?.stop();
     //
     this._preCache?.cancelCachingList();
@@ -359,32 +437,35 @@ export class CacheManager
   // ======= playlist parser
   private addRequestHandlers() {
     this._bridgeServer &&
-      this._bridgeServer.get('*', async (req, res) => {
-        const urlStr = getOriginURL(req.url, this.runningPort!);
+      this._bridgeServer.get(
+        '*',
+        async (req: RequestInterface, res: ResponseInterface) => {
+          const urlStr = getOriginURL(req.url, this.runningPort!);
 
-        let filePath = cacheKey(urlStr ?? '', this.cacheFolder, KEY_PREFIX);
-        if (!urlStr) {
-          return res.send(400, 'text/plain', 'Bad Request');
-        }
-        //
-        const defaultHeaders = Object.assign({}, req?.headers ?? {});
-        // eslint-disable-next-line dot-notation
-        delete defaultHeaders['Host'];
-        // android
-        delete defaultHeaders['host'];
-        delete defaultHeaders['http-client-ip'];
-        delete defaultHeaders['remote-addr'];
-        //
-        // console.log('====== addRequestHandlers: ', urlStr, defaultHeaders);
-        //
-        if (isHLSUrl(urlStr)) {
-          this.addPlaylistHandler(urlStr, filePath, defaultHeaders, res);
+          let filePath = cacheKey(urlStr ?? '', this.cacheFolder, KEY_PREFIX);
+          if (!urlStr) {
+            return res.send(400, 'text/plain', 'Bad Request');
+          }
           //
-        } else {
+          const defaultHeaders = Object.assign({}, req?.headers ?? {});
+          // eslint-disable-next-line dot-notation
+          delete defaultHeaders['Host'];
+          // android
+          delete defaultHeaders['host'];
+          delete defaultHeaders['http-client-ip'];
+          delete defaultHeaders['remote-addr'];
           //
-          this.addSegmentHandler(urlStr, filePath, defaultHeaders, res);
+          // console.log('====== addRequestHandlers: ', urlStr, defaultHeaders);
+          //
+          if (isHLSUrl(urlStr)) {
+            this.addPlaylistHandler(urlStr, filePath, defaultHeaders, res);
+            //
+          } else {
+            //
+            this.addSegmentHandler(urlStr, filePath, defaultHeaders, res);
+          }
         }
-      });
+      );
   }
 
   private async addPlaylistHandler(

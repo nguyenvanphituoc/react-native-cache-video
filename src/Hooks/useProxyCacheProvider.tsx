@@ -62,7 +62,11 @@ export const CacheManagerProvider = ({
     const server = cacheManager.current;
     if (isForeground) {
       const port = portGenerate();
-      server.enableBridgeServer(port);
+      // Result-aware start: terminal failure is already observable via
+      // serverState ('failed') + the ServerStartFailed notification, so the
+      // rejection is intentionally not re-thrown into the effect.
+      // Emit-on-confirmed provider rework belongs to UC-ObserveReadiness.
+      server.enableBridgeServer(port).catch(() => {});
       setTimeout(() => notifyEvent(port), 1000);
     } else if (!isForeground) {
       server.disableBridgeServer();

@@ -4,8 +4,10 @@ import type {
   BridgeServerInterface,
   RequestInterface,
   ResponseInterface,
-  HttpServer,
 } from '../types/type';
+// Contract source of truth for the native seam (result-bearing start):
+// docs/shapeup-sdlc/fix-core-caching-bugs/spec/contracts/native-start.contract.md
+import type { Spec as HttpServerSpec } from '../NativeCacheVideoHttpProxy';
 
 const LINKING_ERROR =
   `The package 'react-native-cache-video' doesn't seem to be linked. Make sure: \n\n` +
@@ -20,7 +22,7 @@ const CacheVideoHttpProxyModule = isTurboModuleEnabled
   ? require('../NativeCacheVideoHttpProxy').default
   : NativeModules.CacheVideoHttpProxy;
 
-export const CacheVideoHttpProxy: HttpServer = CacheVideoHttpProxyModule
+export const CacheVideoHttpProxy: HttpServerSpec = CacheVideoHttpProxyModule
   ? CacheVideoHttpProxyModule
   : new Proxy(
       {},
@@ -36,13 +38,18 @@ export const HttpProxy = {
     port: number,
     serviceName: string,
     callback: (response: any) => void
-  ) => {
+  ): Promise<number> => {
     if (port === 80) {
       throw new Error('Invalid server port specified. Port 80 is reserved.');
     }
 
-    CacheVideoHttpProxy.start(port, serviceName);
+    // Register the request listener BEFORE the bind settles so requests that
+    // arrive immediately after bind are not dropped; a failed start is cleaned
+    // up by the caller via HttpProxy.stop (removeAllListeners).
     DeviceEventEmitter.addListener('httpServerResponseReceived', callback);
+    // Propagate the native result — never fire-and-forget. Promise.resolve
+    // guards against a stale old-arch native binary whose start returns void.
+    return Promise.resolve(CacheVideoHttpProxy.start(port, serviceName));
   },
 
   stop: () => {
@@ -107,6 +114,8 @@ class Response implements ResponseInterface {
 export class BridgeServer implements BridgeServerInterface {
   serviceName: string;
   isRunning: boolean;
+  // The port confirmed by the settled native start — null until then.
+  boundPort: number | null = null;
   callbacks: { method: string; url: string; callback: Function }[];
   static server: BridgeServer;
 
@@ -158,45 +167,58 @@ export class BridgeServer implements BridgeServerInterface {
     this.callbacks.push({ method: '*', url: '*', callback });
   }
 
-  listen = (port: number) => {
+  listen = async (port: number): Promise<number> => {
     if (this.isRunning) {
       console.warn(
-        'HttpServer is already running in port ' + port,
+        'HttpServer is already running in port ' + this.boundPort,
         '. Please stop it first'
       );
-      return;
+      // legacy no-op semantics preserved: report the port already bound
+      return this.boundPort as number;
     }
-    this.isRunning = true;
     if (port < 0 || port > 65535) {
       throw new Error('Invalid port number');
     }
 
-    HttpProxy.start(port, this.serviceName, async (rawRequest: any) => {
-      //
-      const request = new Request(rawRequest);
+    const result = await HttpProxy.start(
+      port,
+      this.serviceName,
+      async (rawRequest: any) => {
+        //
+        const request = new Request(rawRequest);
 
-      const callbacks = this.callbacks.filter(
-        (c) =>
-          (c.method === request.type || c.method === '*') &&
-          (c.url === request.url || c.url === '*')
-      );
+        const callbacks = this.callbacks.filter(
+          (c) =>
+            (c.method === request.type || c.method === '*') &&
+            (c.url === request.url || c.url === '*')
+        );
 
-      for (const c of callbacks) {
-        const response = new Response(request.requestId);
-        const result = await c.callback(request, response);
+        for (const c of callbacks) {
+          const response = new Response(request.requestId);
+          const handled = await c.callback(request, response);
 
-        if (result) {
-          response.json(result);
-        }
-        if (response.closed) {
-          return;
+          if (handled) {
+            response.json(handled);
+          }
+          if (response.closed) {
+            return;
+          }
         }
       }
-    });
+    );
+
+    // Native start settled successfully — only now is the server running.
+    // Legacy natives (void start) resolve undefined: fall back to the
+    // requested port so old binaries keep working.
+    const boundPort = typeof result === 'number' ? result : port;
+    this.isRunning = true;
+    this.boundPort = boundPort;
+    return boundPort;
   };
 
   stop() {
     HttpProxy.stop();
     this.isRunning = false;
+    this.boundPort = null;
   }
 }

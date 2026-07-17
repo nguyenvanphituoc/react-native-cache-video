@@ -17,3 +17,10 @@ export const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'avi', 'wmv'];
 export const THRESH_HOLD_TIMEOUT = 300;
 export const MIN_PORT = 49152;
 export const MAX_PORT = 65535;
+
+// UC-StartCacheServer: total native start attempts per enable cycle (bounded
+// fresh-port retry — pitch RH3: no negotiation protocol).
+export const MAX_START_RETRIES = 3;
+// ServerStartFailed notification (UC-StartCacheServer step 6); payload:
+// { reason: string, attempts: number }. Consumed by the readiness API (TASK-007).
+export const SERVER_START_FAILED_EVENT = 'RNCV_SERVER_START_FAILED';
