@@ -1,13 +1,13 @@
 {
   "scope_id": "reasoned-fallback",
   "topology_type": "ICEBERG",
-  "business_goal": "reverseProxyURL always returns a playable URL and every fallback to origin emits one distinct, cause-naming console warning (PROVIDER_MISSING / SERVER_NOT_STARTED / SERVER_START_FAILED / APP_BACKGROUNDED / INVALID_URL / UNSUPPORTED_URL) — the generic 'invalid url or port' is retired (fixes issue #8; UC-ResolvePlaybackUrl, breadboard N7/N8/U3, slice V3).",
+  "business_goal": "reverseProxyURL always returns a playable URL and every fallback to origin emits one distinct, cause-naming console warning (PROVIDER_MISSING / SERVER_NOT_STARTED / SERVER_START_FAILED / APP_BACKGROUNDED / INVALID_URL / UNSUPPORTED_URL) — the generic 'invalid url or port' is retired (fixes issue #8; UC-ResolvePlaybackUrl, breadboard N7/N8/U3, slice V3; GATE L1b D3: TASK-012 additionally carries the merged fallback-facing lifecycle integration scenarios — dead server impossible to miss).",
   "tasks": ["TASK-008", "TASK-012"],
   "allowed_file_substrate": [
     "src/ProxyCacheManager.ts",
     "src/Hooks/useProxyCacheProvider.tsx",
     "src/Utils/constants.ts",
-    "src/__tests__/issue-8-fallback-reasons.test.ts",
+    "src/__tests__/issue-8-fallback-reasons.test.*",
     "src/__tests__/fallback*.test.*"
   ],
   "shared_substrate": [
