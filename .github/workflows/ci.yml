@@ -112,6 +112,12 @@ jobs:
       - name: Setup
         uses: ./.github/actions/setup
 
+      # Xcode 26.5 lazy-mounts the Metal toolchain, which breaks TOOLCHAIN_DIR
+      # resolution in LIBRARY_SEARCH_PATHS and loses libswiftCompatibility56.a.
+      # Pin to 26.4, the version the example is verified against.
+      - name: Select Xcode 26.4
+        run: sudo xcode-select -s /Applications/Xcode_26.4.app
+
       - name: Cache turborepo for iOS
         uses: actions/cache@v4
         with:
