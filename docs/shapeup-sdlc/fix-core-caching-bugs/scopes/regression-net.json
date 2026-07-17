@@ -1,0 +1,21 @@
+{
+  "scope_id": "regression-net",
+  "topology_type": "CHOWDER",
+  "business_goal": "yarn test runs a real harness (working blob-util mock, controllable NativeCacheVideoHttpProxy mock, DeviceEventEmitter/AppState harness) plus one end-to-end integration test over the whole server lifecycle chain (start/retry/fail/observe/resolve) — the regression net every other scope's repro tests stand on (breadboard V5 infrastructure; declared CHOWDER: cross-cutting test infrastructure with no single business flow).",
+  "tasks": ["TASK-001", "TASK-015"],
+  "allowed_file_substrate": [
+    "src/__mock__/**",
+    "src/__tests__/index.test.tsx",
+    "src/__tests__/integration-server-lifecycle.test.tsx",
+    "jest.setup.*",
+    "jest.config.*",
+    "package.json"
+  ],
+  "shared_substrate": [],
+  "affordance_manifest": [],
+  "e2e_verification_fixtures": [
+    "yarn test",
+    "yarn typecheck"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}

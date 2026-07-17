@@ -1,0 +1,33 @@
+{
+  "scope_id": "server-start-truth",
+  "topology_type": "ICEBERG",
+  "business_goal": "enableBridgeServer reflects native truth end-to-end: the server is 'ready' only with a real bound port confirmed by iOS/Android, retries up to 3 fresh random ports on bind failure, and ends at 'failed' otherwise — a silently dead server becomes impossible (UC-StartCacheServer, breadboard V1+V2 mechanism N2/N3/N4/S1).",
+  "tasks": ["TASK-002", "TASK-003", "TASK-004", "TASK-005", "TASK-006"],
+  "allowed_file_substrate": [
+    "src/NativeCacheVideoHttpProxy.ts",
+    "src/Libs/httpProxy.ts",
+    "ios/CacheVideoHttpProxy.*",
+    "android/src/main/java/com/cachevideo/CacheVideoHttpProxyModule.kt",
+    "android/src/main/java/com/cachevideo/httpServer/Server.kt",
+    "src/ProxyCacheManager.ts",
+    "src/Hooks/useProxyCacheProvider.tsx",
+    "src/Utils/constants.ts",
+    "src/Utils/util.ts",
+    "src/__tests__/server-start*.test.*",
+    "src/__tests__/port-retry*.test.*",
+    "build/codegen-check/**"
+  ],
+  "shared_substrate": [
+    "src/ProxyCacheManager.ts",
+    "src/Hooks/useProxyCacheProvider.tsx",
+    "src/Utils/constants.ts"
+  ],
+  "affordance_manifest": [],
+  "e2e_verification_fixtures": [
+    "yarn test --testPathPattern 'server-start|port-retry'",
+    "yarn typecheck",
+    "node node_modules/react-native/scripts/generate-codegen-artifacts.js -p . -t all -o ./build/codegen-check",
+    "TBD(native-build): example/ios pod install + Xcode build and example/android gradlew assembleDebug are TASK-003/TASK-004 AC but run in CI (build-ios workflow) / manual — too heavy for per-attempt T0 on this machine"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}
