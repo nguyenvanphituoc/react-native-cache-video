@@ -10,6 +10,7 @@ import type {
   MemoryCachePolicyInterface,
 } from './types/type';
 import {
+  HLS_CACHING_RESTART,
   HLS_CONTENT_TYPE,
   HLS_VIDEO_TYPE,
   KEY_PREFIX,
@@ -26,6 +27,56 @@ export interface ServerState {
   status: ServerStatus;
   port: number | null;
 }
+
+// - MARK: Readiness API (UC-ObserveReadiness, issue #6)
+// Module-level mirror of S1 — one server per app, so the last transition of
+// the active CacheManager is THE readiness truth (INV-02). Query it any time
+// with getServerState(); subscribe with subscribeServerState(cb), which
+// delivers the current snapshot immediately so late subscribers never miss
+// the ready transition (INV-01).
+type ServerStateSubscriber = (state: ServerState) => void;
+
+let currentServerState: ServerState = { status: 'idle', port: null };
+const serverStateSubscribers = new Set<ServerStateSubscriber>();
+
+function publishServerState(state: ServerState) {
+  currentServerState = state;
+  for (const subscriber of Array.from(serverStateSubscribers)) {
+    subscriber(state);
+  }
+}
+
+/** Current server-lifecycle snapshot, synchronously (UC-ObserveReadiness). */
+export function getServerState(): ServerState {
+  return currentServerState;
+}
+
+/**
+ * Subscribe to server-lifecycle transitions. `cb` is invoked IMMEDIATELY with
+ * the current snapshot (late-subscriber safety, issue #6), then on every
+ * subsequent transition. Returns an unsubscribe function.
+ */
+export function subscribeServerState(cb: ServerStateSubscriber): () => void {
+  if (typeof cb !== 'function') {
+    // TS-ERR-INVALID_SUBSCRIBER: reject synchronously, register nothing
+    throw new TypeError(
+      'subscribeServerState: callback must be a function, got ' + typeof cb
+    );
+  }
+  serverStateSubscribers.add(cb);
+  cb(currentServerState);
+  return () => {
+    serverStateSubscribers.delete(cb);
+  };
+}
+
+// Test-only: restore the module-level readiness store to its pristine state.
+// Deliberately NOT re-exported from src/index.tsx (not public surface).
+export function __resetServerStateForTests(): void {
+  serverStateSubscribers.clear();
+  currentServerState = { status: 'idle', port: null };
+}
+// END: Readiness API
 
 // HTTP/2 origins deliver lowercase header names; a bare ['Content-Type'] lookup
 // sends undefined over the bridge as the respond() type param (INV-08).
@@ -108,6 +159,19 @@ export class CacheManager
   // through this single state — never through optimistic flags.
   get serverState(): ServerState {
     return this._serverState;
+  }
+
+  // Single S1 write path: keeps the instance state, the module-level
+  // readiness store and the legacy DeviceEventEmitter channel in agreement
+  // (UC-ObserveReadiness INV-02/INV-03). The legacy RNCV_HLS_CACHING_RESTART
+  // event fires when (and only when) the native start CONFIRMED a bind —
+  // never from a timer, never on failure.
+  private setServerState(next: ServerState) {
+    this._serverState = next;
+    publishServerState(next);
+    if (next.status === 'ready') {
+      DeviceEventEmitter.emit(HLS_CACHING_RESTART, next.port);
+    }
   }
 
   // Derived from S1: defined iff the native start confirmed the bind, so it
@@ -367,7 +431,7 @@ export class CacheManager
    */
   async enableBridgeServer(port: number): Promise<void> {
     const cycle = ++this._enableCycle;
-    this._serverState = { status: 'starting', port: null };
+    this.setServerState({ status: 'starting', port: null });
     //
     this.addRequestHandlers();
     // A missing cache-registry file must not kill server start (read side
@@ -386,7 +450,7 @@ export class CacheManager
           // stale success of a cancelled cycle (disable already ran) — ignore
           return;
         }
-        this._serverState = { status: 'ready', port: boundPort };
+        this.setServerState({ status: 'ready', port: boundPort });
         return;
       } catch (error) {
         if (cycle !== this._enableCycle) {
@@ -405,7 +469,7 @@ export class CacheManager
       }
     }
 
-    this._serverState = { status: 'failed', port: null };
+    this.setServerState({ status: 'failed', port: null });
     DeviceEventEmitter.emit(SERVER_START_FAILED_EVENT, {
       reason: lastError instanceof Error ? lastError.message : `${lastError}`,
       attempts: MAX_START_RETRIES,
@@ -416,7 +480,7 @@ export class CacheManager
   disableBridgeServer() {
     // invalidate any in-flight start: its late result must be ignored (RH4)
     this._enableCycle++;
-    this._serverState = { status: 'idle', port: null };
+    this.setServerState({ status: 'idle', port: null });
     this._bridgeServer?.stop();
     //
     this._preCache?.cancelCachingList();

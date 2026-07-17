@@ -1,9 +1,7 @@
-import React, { createContext, useCallback, useEffect, useRef } from 'react';
-import RNModule from 'react-native';
+import React, { createContext, useEffect, useRef } from 'react';
 
 import { CacheManager } from '../ProxyCacheManager';
 import { useIsForeground } from './useIsForeground';
-import { HLS_CACHING_RESTART } from '../Utils/constants';
 import type { MemoryCachePolicyInterface } from '../types/type';
 import { portGenerate } from '../Utils/util';
 import { isMemoryCachePolicyInterface } from '../user-defined-guard';
@@ -37,12 +35,6 @@ export const CacheManagerProvider = ({
   );
   //
   const isForeground = useIsForeground();
-  //
-  // we dont use state here because we dont want to re-render the component
-  // you should listen HLS_CACHING_RESTART event to get the running port
-  const notifyEvent = useCallback((runningPort: number) => {
-    RNModule.DeviceEventEmitter.emit(HLS_CACHING_RESTART, runningPort);
-  }, []);
 
   useEffect(() => {
     const server = cacheManager.current;
@@ -65,9 +57,10 @@ export const CacheManagerProvider = ({
       // Result-aware start: terminal failure is already observable via
       // serverState ('failed') + the ServerStartFailed notification, so the
       // rejection is intentionally not re-thrown into the effect.
-      // Emit-on-confirmed provider rework belongs to UC-ObserveReadiness.
+      // RNCV_HLS_CACHING_RESTART is emitted by the CacheManager itself when
+      // (and only when) the native start CONFIRMS the bind — with the ACTUAL
+      // bound port, never a timer-guessed one (UC-ObserveReadiness INV-03).
       server.enableBridgeServer(port).catch(() => {});
-      setTimeout(() => notifyEvent(port), 1000);
     } else if (!isForeground) {
       server.disableBridgeServer();
     }
@@ -75,7 +68,7 @@ export const CacheManagerProvider = ({
     return () => {
       server.disableBridgeServer();
     };
-  }, [isForeground, notifyEvent]);
+  }, [isForeground]);
 
   return (
     <CacheManagerContext.Provider

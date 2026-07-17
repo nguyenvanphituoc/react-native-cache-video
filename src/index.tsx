@@ -1,4 +1,10 @@
-export { CacheManager } from './ProxyCacheManager';
+export {
+  CacheManager,
+  getServerState,
+  subscribeServerState,
+  type ServerState,
+  type ServerStatus,
+} from './ProxyCacheManager';
 export * from './Provider';
 export * from './Hooks';
 export * from './types/type.d';
