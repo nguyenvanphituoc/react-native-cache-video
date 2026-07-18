@@ -51,6 +51,9 @@ jobs:
           # One always-visible summary comment, updated in place on each push.
           # Trade-off: sticky mode replaces inline diff comments with the single summary.
           use_sticky_comment: true
+          # Post the review report even when there are zero findings — without this,
+          # a clean review leaves no visible trace on the PR (only the Actions log).
+          display_report: true
           # Sanity-check inline findings through a fast model before posting (fewer false positives)
           classify_inline_comments: true
           include_fix_links: true
