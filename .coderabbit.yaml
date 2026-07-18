@@ -1,0 +1,9 @@
+# CodeRabbit is disabled for this repository — Claude Code Review
+# (.github/workflows/claude-code-review.yml) is the source of PR review.
+# To remove CodeRabbit entirely, uninstall the GitHub App:
+# repo Settings → Integrations → GitHub Apps → CodeRabbit → Configure/Uninstall.
+reviews:
+  auto_review:
+    enabled: false
+chat:
+  auto_reply: false
