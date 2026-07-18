@@ -59,6 +59,12 @@ jobs:
           # Sanity-check inline findings through a fast model before posting (fewer false positives)
           classify_inline_comments: true
           include_fix_links: true
+          # The plugin posts findings via `gh pr comment` (summary) and the
+          # inline-comment MCP tool — BOTH must be explicitly allowed or the
+          # posting step is silently permission-denied and the review stays
+          # terminal-only (the exact failure seen on PR #13's runs).
+          claude_args: |
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment,Read,Glob,Grep"
           # Review severity/scope tuning lives in REVIEW.md at the repo root.
           # NOTE: changes to this file only take effect after merging to main —
           # the action refuses to run a pull_request-triggered workflow whose
