@@ -305,9 +305,7 @@ describe('TASK-009: verified cache writes (temp path → verify → atomic promo
     });
 
     it('schemeless junk string → no-op, no crash from URL parsing', async () => {
-      await expect(manager.preCacheFor('not-a-url')).resolves.toBe(
-        'not-a-url'
-      );
+      await expect(manager.preCacheFor('not-a-url')).resolves.toBe('not-a-url');
 
       expectNoNetworkNoFilesystem();
     });

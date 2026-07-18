@@ -574,7 +574,7 @@ export class CacheManager
           // eslint-disable-next-line dot-notation
           delete defaultHeaders['Host'];
           // android
-          delete defaultHeaders['host'];
+          delete defaultHeaders.host;
           delete defaultHeaders['http-client-ip'];
           delete defaultHeaders['remote-addr'];
           //

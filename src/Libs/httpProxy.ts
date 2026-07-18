@@ -187,7 +187,9 @@ export class BridgeServer implements BridgeServerInterface {
     // Throwing inside this async method rejects the returned promise.
     if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) {
       throw new Error(
-        `Invalid server port specified. Expected an integer in ${MIN_PORT}-${MAX_PORT}, got ${String(port)}.`
+        `Invalid server port specified. Expected an integer in ${MIN_PORT}-${MAX_PORT}, got ${String(
+          port
+        )}.`
       );
     }
 
