@@ -2,28 +2,37 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    types: [opened, synchronize, ready_for_review]
+    # Review only code-bearing changes; docs/config churn is CI-checked, not reviewed
+    paths:
+      - 'src/**'
+      - 'ios/**'
+      - 'android/**'
+      - 'plugin/src/**'
+      - 'example/**'
+      - 'example-expo/**'
+      - 'package.json'
+      - '*.podspec'
+
+# One review per PR at a time; a new push cancels the superseded run (cost control)
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Skip drafts, bot-authored PRs, and PRs opting out via [skip-review]
+    if: |
+      !github.event.pull_request.draft &&
+      github.event.pull_request.user.type != 'Bot' &&
+      !contains(github.event.pull_request.title, '[skip-review]')
 
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write # post/update the review comment
       issues: read
-      id-token: write
+      id-token: write # required for OAuth token exchange
 
     steps:
       - name: Checkout repository
@@ -39,6 +48,14 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # One always-visible summary comment, updated in place on each push.
+          # Trade-off: sticky mode replaces inline diff comments with the single summary.
+          use_sticky_comment: true
+          # Sanity-check inline findings through a fast model before posting (fewer false positives)
+          classify_inline_comments: true
+          include_fix_links: true
+          # Review severity/scope tuning lives in REVIEW.md at the repo root.
+          # NOTE: changes to this file only take effect after merging to main —
+          # the action refuses to run a pull_request-triggered workflow whose
+          # file differs from the default branch (anti-tampering).
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-
