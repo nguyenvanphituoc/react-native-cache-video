@@ -47,7 +47,9 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # --comment is required for the plugin to post findings to the PR;
+          # without it the review is a terminal-only summary in the run log.
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
           # One always-visible summary comment, updated in place on each push.
           # Trade-off: sticky mode replaces inline diff comments with the single summary.
           use_sticky_comment: true
