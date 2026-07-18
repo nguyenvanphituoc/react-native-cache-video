@@ -34,3 +34,11 @@ Budgets: round_budget=2 (outer) · attempt_budget=5 (inner, per scope) · auto=-
 | reasoned-fallback | DOWNHILL_EXECUTION | T0 🟢 a1; T1 no findings against it |
 
 EVAL r1: FAIL — 41/45 criteria, 3 bugs; headline #8/#6/#5 behaviors probed green by the judge.
+
+| scope | r2 phase | notes |
+|---|---|---|
+| server-start-truth | DOWNHILL_EXECUTION | BUG-1 closed (T0 🟢 r2-a1); iOS + Android example builds ✅ local (both build ACs pass, corrected envelope re-ingested) |
+| verified-cache-pipeline | DOWNHILL_EXECUTION | BUG-2/3 closed (T0 🟢 r2-a1) |
+| regression-net / readiness-observation / reasoned-fallback | DOWNHILL_EXECUTION | untouched in r2; judge re-ran regression-net fixtures at HEAD, green |
+
+EVAL r2: PASS — 37/37 criteria, 0 bugs, no regressions (97/97 tests at b3531e8). FINISHED pends merge to main.
