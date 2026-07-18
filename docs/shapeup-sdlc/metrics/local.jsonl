@@ -1,0 +1,3 @@
+{"schema_version":1,"at":"2026-07-17T09:33:32.467Z","kind":"pathology","pathology":"PA3","scope_id":"verified-cache-pipeline","slug":"fix-core-caching-bugs","blocked_paths":["docs/shapeup-sdlc/fix-core-caching-bugs/scopes/server-start-truth.json"]}
+{"schema_version":1,"at":"2026-07-17T09:33:36.317Z","kind":"pathology","pathology":"PA3","scope_id":"verified-cache-pipeline","slug":"fix-core-caching-bugs","blocked_paths":["docs/shapeup-sdlc/fix-core-caching-bugs/scopes/readiness-observation.json"]}
+{"schema_version":1,"at":"2026-07-17T09:33:40.101Z","kind":"pathology","pathology":"PA3","scope_id":"verified-cache-pipeline","slug":"fix-core-caching-bugs","blocked_paths":["docs/shapeup-sdlc/fix-core-caching-bugs/scopes/verified-cache-pipeline.json"]}

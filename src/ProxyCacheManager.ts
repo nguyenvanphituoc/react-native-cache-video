@@ -1,20 +1,84 @@
+import { DeviceEventEmitter } from 'react-native';
 import type {
   SessionTaskInterface,
   PreCacheDelegate,
   MemoryCacheInterface,
   MemoryCacheDelegate,
-  BridgeServerInterface,
+  RequestInterface,
   ResponseInterface,
   PreCacheInterface,
   MemoryCachePolicyInterface,
 } from './types/type';
 import {
+  FALLBACK_WARNINGS,
+  HLS_CACHING_RESTART,
   HLS_CONTENT_TYPE,
   HLS_VIDEO_TYPE,
   KEY_PREFIX,
+  MAX_START_RETRIES,
+  SERVER_START_FAILED_EVENT,
   SIGNAL_NOT_DOWNLOAD_ACTION,
   // VIDEO_EXTENSIONS,
 } from './Utils/constants';
+import type { FallbackReason } from './Utils/constants';
+
+// UC-StartCacheServer S1 — the single server-lifecycle truth. `port` is
+// non-null iff status === 'ready' (native start confirmed the bind).
+export type ServerStatus = 'idle' | 'starting' | 'ready' | 'failed';
+export interface ServerState {
+  status: ServerStatus;
+  port: number | null;
+}
+
+// - MARK: Readiness API (UC-ObserveReadiness, issue #6)
+// Module-level mirror of S1 — one server per app, so the last transition of
+// the active CacheManager is THE readiness truth (INV-02). Query it any time
+// with getServerState(); subscribe with subscribeServerState(cb), which
+// delivers the current snapshot immediately so late subscribers never miss
+// the ready transition (INV-01).
+type ServerStateSubscriber = (state: ServerState) => void;
+
+let currentServerState: ServerState = { status: 'idle', port: null };
+const serverStateSubscribers = new Set<ServerStateSubscriber>();
+
+function publishServerState(state: ServerState) {
+  currentServerState = state;
+  for (const subscriber of Array.from(serverStateSubscribers)) {
+    subscriber(state);
+  }
+}
+
+/** Current server-lifecycle snapshot, synchronously (UC-ObserveReadiness). */
+export function getServerState(): ServerState {
+  return currentServerState;
+}
+
+/**
+ * Subscribe to server-lifecycle transitions. `cb` is invoked IMMEDIATELY with
+ * the current snapshot (late-subscriber safety, issue #6), then on every
+ * subsequent transition. Returns an unsubscribe function.
+ */
+export function subscribeServerState(cb: ServerStateSubscriber): () => void {
+  if (typeof cb !== 'function') {
+    // TS-ERR-INVALID_SUBSCRIBER: reject synchronously, register nothing
+    throw new TypeError(
+      'subscribeServerState: callback must be a function, got ' + typeof cb
+    );
+  }
+  serverStateSubscribers.add(cb);
+  cb(currentServerState);
+  return () => {
+    serverStateSubscribers.delete(cb);
+  };
+}
+
+// Test-only: restore the module-level readiness store to its pristine state.
+// Deliberately NOT re-exported from src/index.tsx (not public surface).
+export function __resetServerStateForTests(): void {
+  serverStateSubscribers.clear();
+  currentServerState = { status: 'idle', port: null };
+}
+// END: Readiness API
 
 // HTTP/2 origins deliver lowercase header names; a bare ['Content-Type'] lookup
 // sends undefined over the bridge as the respond() type param (INV-08).
@@ -32,7 +96,12 @@ function contentTypeOf(
   return fallback;
 }
 
-import { FileBucket, FileSystemManager } from './Libs/fileSystem';
+import {
+  FileBucket,
+  FileSystemManager,
+  isTempCachePath,
+  tempCachePathFor,
+} from './Libs/fileSystem';
 import { SimpleSessionProvider, type Encoding } from './Libs/session';
 import {
   absoluteFilePath,
@@ -40,6 +109,7 @@ import {
   getCacheKey,
   getOriginURL,
   isHLSUrl,
+  portGenerate,
   reverseProxyPlaylist,
   reverseProxyURL,
 } from './Utils/util';
@@ -54,11 +124,26 @@ export class CacheManager
   //
   private _sessionTask: SessionTaskInterface;
   private _storage: FileSystemManager;
-  private _bridgeServer: BridgeServerInterface;
+  private _bridgeServer: BridgeServer;
   private _preCache: PreCacheInterface;
   //
-  private runningPort?: number;
+  // S1: single server-lifecycle truth, driven ONLY by the settled native
+  // start/stop result (UC-StartCacheServer INV-01).
+  private _serverState: ServerState = { status: 'idle', port: null };
+  // Enable-cycle token: results settling for a superseded cycle are ignored
+  // (RH4 churn guard — UC-StartCacheServer INV-04).
+  private _enableCycle = 0;
+  // True iff the last disable was the app-backgrounded stop (provider's
+  // !isForeground branch) — lets reverseProxyURL name APP_BACKGROUNDED
+  // instead of the generic not-started cause (UC-ResolvePlaybackUrl step 3).
+  private _stoppedByBackground = false;
   private _memoryCache?: MemoryCacheInterface<string>;
+
+  // N8 provider-missing guard (issue #8, round-ledger D5): true ONLY on the
+  // module-default context instance in useProxyCacheProvider — a non-breaking
+  // marker (the default manager keeps working for consumers that rely on it),
+  // so reverseProxyURL can name PROVIDER_MISSING as the fallback cause.
+  isDefaultContext = false;
   //
   constructor(
     serverName: string,
@@ -80,6 +165,33 @@ export class CacheManager
 
   get sessionTask() {
     return this._sessionTask;
+  }
+
+  // Readable S1 (UC-StartCacheServer): consumers observe the server lifecycle
+  // through this single state — never through optimistic flags.
+  get serverState(): ServerState {
+    return this._serverState;
+  }
+
+  // Single S1 write path: keeps the instance state, the module-level
+  // readiness store and the legacy DeviceEventEmitter channel in agreement
+  // (UC-ObserveReadiness INV-02/INV-03). The legacy RNCV_HLS_CACHING_RESTART
+  // event fires when (and only when) the native start CONFIRMED a bind —
+  // never from a timer, never on failure.
+  private setServerState(next: ServerState) {
+    this._serverState = next;
+    publishServerState(next);
+    if (next.status === 'ready') {
+      DeviceEventEmitter.emit(HLS_CACHING_RESTART, next.port);
+    }
+  }
+
+  // Derived from S1: defined iff the native start confirmed the bind, so it
+  // can never be non-null outside 'ready'.
+  private get runningPort(): number | undefined {
+    return this._serverState.status === 'ready'
+      ? this._serverState.port ?? undefined
+      : undefined;
   }
 
   get localFileUrl(): string {
@@ -116,10 +228,26 @@ export class CacheManager
     return this._memoryCache?.get(key);
   }
 
+  // Serve-guard (issue #5 read side): only VERIFIED entries are ever served.
+  // Registration implies verified (UC-CacheLargeFile INV-01); on-disk files
+  // carrying the temp/unverified suffix are deleted, never resurrected.
+  // `undefined` is the documented "cache miss — play the origin URL" signal
+  // consumed by useAsyncCache; a dangling local path is never returned.
   async getCachedFileAsync(
     url: string,
     folder: string = this.cacheFolder
   ): Promise<string | undefined> {
+    // no url → defined no-op: caller keeps its (missing) origin source
+    if (!url) {
+      return undefined;
+    }
+
+    const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
+      url,
+      folder,
+      KEY_PREFIX
+    );
+
     // Check memory cache first
     const cachedKey = this.getCachedFile(url);
     if (cachedKey) {
@@ -127,23 +255,32 @@ export class CacheManager
       if (await this._storage.existsFile(cachedKey)) {
         return cachedKey;
       } else {
-        // File missing - clean up cache entries
-        this._memoryCache?.syncCache(url);
+        // STALE_ENTRY: registered but file gone — evict, degrade to origin
+        this._memoryCache?.syncCache(originURL.href);
         return undefined;
       }
     }
 
-    // access cache in file system
-    const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
-      url,
-      folder,
-      KEY_PREFIX
-    );
-    if (await this._storage.existsFile(cacheKeyStr)) {
-      this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
-      this.getCachedFile(originURL.href);
-      return cacheKeyStr;
+    // Filesystem fallback — registry lost (e.g. app restart). Only files at
+    // the FINAL cache path were verified in a previous session and may be
+    // re-registered; a temp-convention path is never served.
+    if (!isTempCachePath(cacheKeyStr)) {
+      if (await this._storage.existsFile(cacheKeyStr)) {
+        this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
+        this.getCachedFile(originURL.href);
+        return cacheKeyStr;
+      }
     }
+
+    // UNVERIFIED_ENTRY: an orphaned temp-suffix partial (killed session) is
+    // deleted so it can never be resurrected — request degrades to origin
+    const orphanTempPath = isTempCachePath(cacheKeyStr)
+      ? cacheKeyStr
+      : tempCachePathFor(cacheKeyStr);
+    if (await this._storage.existsFile(orphanTempPath)) {
+      await this._storage.unlinkFile(orphanTempPath);
+    }
+
     // remove reference if need
     this._memoryCache?.syncCache(originURL.href);
 
@@ -297,18 +434,72 @@ export class CacheManager
   // END: PreCacheDelegate
 
   // - MARK: BridgeServer
-  enableBridgeServer(port: number) {
-    //
-    this.runningPort = port;
-    this._bridgeServer.listen(port);
+  /**
+   * Start the bridge server and reflect the NATIVE truth in serverState:
+   * 'ready' only after the native start promise resolved with a bound port,
+   * retrying up to MAX_START_RETRIES total attempts on fresh random ports,
+   * 'failed' (+ ServerStartFailed notification) after the last rejection
+   * (UC-StartCacheServer steps 2-6).
+   */
+  async enableBridgeServer(port: number): Promise<void> {
+    const cycle = ++this._enableCycle;
+    this._stoppedByBackground = false;
+    this.setServerState({ status: 'starting', port: null });
     //
     this.addRequestHandlers();
-    //
-    this.loadCacheFromStorage();
+    // A missing cache-registry file must not kill server start (read side
+    // degrades to an empty registry).
+    this.loadCacheFromStorage().catch(() => {});
+
+    const attemptedPorts: number[] = [];
+    let attemptPort = port;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= MAX_START_RETRIES; attempt++) {
+      attemptedPorts.push(attemptPort);
+      try {
+        const boundPort = await this._bridgeServer.listen(attemptPort);
+        if (cycle !== this._enableCycle) {
+          // stale success of a cancelled cycle (disable already ran) — ignore
+          return;
+        }
+        this.setServerState({ status: 'ready', port: boundPort });
+        return;
+      } catch (error) {
+        if (cycle !== this._enableCycle) {
+          // stale failure of a cancelled cycle — ignore, don't touch state
+          return;
+        }
+        lastError = error;
+        // stop any half-started native server before the next attempt
+        this._bridgeServer.stop();
+        if (attempt < MAX_START_RETRIES) {
+          // fresh random port (49152-65535), distinct from every failed one
+          do {
+            attemptPort = portGenerate();
+          } while (attemptedPorts.includes(attemptPort));
+        }
+      }
+    }
+
+    this.setServerState({ status: 'failed', port: null });
+    DeviceEventEmitter.emit(SERVER_START_FAILED_EVENT, {
+      reason: lastError instanceof Error ? lastError.message : `${lastError}`,
+      attempts: MAX_START_RETRIES,
+    });
+    throw lastError;
   }
 
-  disableBridgeServer() {
-    this.runningPort = undefined;
+  /**
+   * Stop the bridge server. `cause: 'backgrounded'` is passed by the
+   * provider's app-backgrounded branch so the next reverseProxyURL fallback
+   * can name APP_BACKGROUNDED; any other stop resets that marker.
+   */
+  disableBridgeServer(cause?: 'backgrounded') {
+    // invalidate any in-flight start: its late result must be ignored (RH4)
+    this._enableCycle++;
+    this._stoppedByBackground = cause === 'backgrounded';
+    this.setServerState({ status: 'idle', port: null });
     this._bridgeServer?.stop();
     //
     this._preCache?.cancelCachingList();
@@ -317,44 +508,87 @@ export class CacheManager
     this.saveCacheToStorage();
   }
 
-  reverseProxyURL(forUrl: string) {
-    if (!forUrl.startsWith('http') || !this.runningPort || !isHLSUrl(forUrl)) {
-      console.warn(
-        'reverseProxyURL: invalid url or port.\nShould check if bridge server is running and has been used CDN url start with http protocol.'
-      );
-      return forUrl;
+  /**
+   * UC-ResolvePlaybackUrl (issue #8): ALWAYS returns a playable string — the
+   * cache-proxied URL when the server is ready and the URL is a proxyable HLS
+   * playlist, otherwise the ORIGINAL url plus exactly ONE console warning
+   * naming the actual cause (INV-01/INV-02; the generic "invalid url or
+   * port" is retired). Never throws, never returns null.
+   */
+  reverseProxyURL(forUrl: string): string {
+    // 1. N8 guard: reached through the module-default context — no
+    //    <CacheManagerProvider> is mounted above the caller.
+    if (this.isDefaultContext) {
+      return this.fallbackToOrigin(forUrl, 'PROVIDER_MISSING');
     }
-    return reverseProxyURL(forUrl, this.runningPort);
+    // 2. Only http(s) URLs can be proxied (non-string input degrades to the
+    //    same defined fallback — TS-REQ-url-missing, no crash).
+    if (typeof forUrl !== 'string' || !/^https?:\/\//i.test(forUrl)) {
+      return this.fallbackToOrigin(forUrl, 'INVALID_URL');
+    }
+    // 3. S1 read — every non-ready status names its cause.
+    const { status, port } = this._serverState;
+    if (status === 'failed') {
+      return this.fallbackToOrigin(forUrl, 'SERVER_START_FAILED');
+    }
+    if (status !== 'ready') {
+      return this.fallbackToOrigin(
+        forUrl,
+        this._stoppedByBackground ? 'APP_BACKGROUNDED' : 'SERVER_NOT_STARTED'
+      );
+    }
+    // 4/5. ready: proxy HLS playlists; anything else — including an
+    //      http-prefixed string the URL parser rejects — still returns the
+    //      original url (INV-01: playback never breaks).
+    try {
+      if (!isHLSUrl(forUrl)) {
+        return this.fallbackToOrigin(forUrl, 'UNSUPPORTED_URL');
+      }
+      return reverseProxyURL(forUrl, port!);
+    } catch (_error) {
+      return this.fallbackToOrigin(forUrl, 'INVALID_URL');
+    }
+  }
+
+  // Every fallback is observable (ConsoleSurface RULE-07): exactly one
+  // reasoned warning per fallback event, then the original url unchanged —
+  // no code path returns the origin URL silently (INV-02).
+  private fallbackToOrigin(forUrl: string, reason: FallbackReason): string {
+    console.warn(FALLBACK_WARNINGS[reason]);
+    return forUrl;
   }
   // ======= playlist parser
   private addRequestHandlers() {
     this._bridgeServer &&
-      this._bridgeServer.get('*', async (req, res) => {
-        const urlStr = getOriginURL(req.url, this.runningPort!);
+      this._bridgeServer.get(
+        '*',
+        async (req: RequestInterface, res: ResponseInterface) => {
+          const urlStr = getOriginURL(req.url, this.runningPort!);
 
-        let filePath = cacheKey(urlStr ?? '', this.cacheFolder, KEY_PREFIX);
-        if (!urlStr) {
-          return res.send(400, 'text/plain', 'Bad Request');
-        }
-        //
-        const defaultHeaders = Object.assign({}, req?.headers ?? {});
-        // eslint-disable-next-line dot-notation
-        delete defaultHeaders['Host'];
-        // android
-        delete defaultHeaders['host'];
-        delete defaultHeaders['http-client-ip'];
-        delete defaultHeaders['remote-addr'];
-        //
-        // console.log('====== addRequestHandlers: ', urlStr, defaultHeaders);
-        //
-        if (isHLSUrl(urlStr)) {
-          this.addPlaylistHandler(urlStr, filePath, defaultHeaders, res);
+          let filePath = cacheKey(urlStr ?? '', this.cacheFolder, KEY_PREFIX);
+          if (!urlStr) {
+            return res.send(400, 'text/plain', 'Bad Request');
+          }
           //
-        } else {
+          const defaultHeaders = Object.assign({}, req?.headers ?? {});
+          // eslint-disable-next-line dot-notation
+          delete defaultHeaders['Host'];
+          // android
+          delete defaultHeaders.host;
+          delete defaultHeaders['http-client-ip'];
+          delete defaultHeaders['remote-addr'];
           //
-          this.addSegmentHandler(urlStr, filePath, defaultHeaders, res);
+          // console.log('====== addRequestHandlers: ', urlStr, defaultHeaders);
+          //
+          if (isHLSUrl(urlStr)) {
+            this.addPlaylistHandler(urlStr, filePath, defaultHeaders, res);
+            //
+          } else {
+            //
+            this.addSegmentHandler(urlStr, filePath, defaultHeaders, res);
+          }
         }
-      });
+      );
   }
 
   private async addPlaylistHandler(

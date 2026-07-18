@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "round": 2,
+  "attempt": 1,
+  "at": "2026-07-17T16:57:27.341Z",
+  "scope_id": "verified-cache-pipeline",
+  "fixtures": [
+    {
+      "cmd": "yarn test --testPathPattern 'issue-5-incomplete-file|verified-cache|serve-guard'",
+      "exit": 0,
+      "pass": true
+    },
+    {
+      "cmd": "yarn typecheck",
+      "exit": 0,
+      "pass": true
+    }
+  ],
+  "db_probe": null,
+  "seesaw": {
+    "ran": false,
+    "pass": true,
+    "scopes_checked": [],
+    "failing": []
+  },
+  "fixtures_green": true,
+  "db_probe_green": true,
+  "seesaw_green": true,
+  "overall": "green",
+  "regression": false,
+  "discovered_tasks": []
+}

@@ -10,6 +10,21 @@ export enum FileBucket {
   cache = 'react-native-cache-video/',
 }
 
+// Temp-suffix naming convention for not-yet-verified downloads (issue #5).
+// A download lands at `<finalCachePath>.part` and is renamed to the final
+// path only after size verification passes — so the suffix itself is the
+// cross-restart "unverified" marker: any file carrying it is a partial by
+// definition and must never be served or re-registered.
+export const TEMP_FILE_SUFFIX = '.part';
+
+export function tempCachePathFor(finalCachePath: string): string {
+  return `${finalCachePath}${TEMP_FILE_SUFFIX}`;
+}
+
+export function isTempCachePath(filePath: string): boolean {
+  return filePath.endsWith(TEMP_FILE_SUFFIX);
+}
+
 export class FileSystemManager {
   private static _instance: FileSystemManager;
 
@@ -117,6 +132,13 @@ export class FileSystemManager {
     }
 
     return fromPath;
+  }
+
+  // Atomic promote: `fs.mv` is a rename when source and destination share a
+  // directory — unlike `copyfile` (cp + unlink), a crash mid-call can never
+  // leave a half-written file at the destination.
+  async moveFile(fromPath: string, toPath: string): Promise<void> {
+    await FSManager.mv(fromPath, toPath);
   }
 
   async unlinkFile(fromPath?: string) {

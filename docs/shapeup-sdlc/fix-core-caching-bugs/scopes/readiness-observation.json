@@ -1,0 +1,38 @@
+{
+  "scope_id": "readiness-observation",
+  "topology_type": "LAYER_CAKE",
+  "business_goal": "Any component — however late it mounts — can query getServerState() or subscribe subscribeServerState() and immediately learn {status, port}; the example/ app visibly renders idle/starting/ready:port/failed via the new readiness indicator (fixes issue #6; UC-ObserveReadiness, breadboard N5/N6/U2, slices V2+U2 demo; GATE L1b D3: example-expo indicator hammered out, TASK-013 additionally carries the merged observation-facing lifecycle integration scenarios).",
+  "tasks": ["TASK-007", "TASK-011", "TASK-013"],
+  "allowed_file_substrate": [
+    "src/ProxyCacheManager.ts",
+    "src/Hooks/useProxyCacheProvider.tsx",
+    "src/index.tsx",
+    "example/src/**",
+    "src/__tests__/issue-6-late-subscriber.test.*",
+    "src/__tests__/readiness*.test.*"
+  ],
+  "shared_substrate": [
+    "src/ProxyCacheManager.ts",
+    "src/Hooks/useProxyCacheProvider.tsx"
+  ],
+  "affordance_manifest": [
+    {
+      "test_id": "readiness-indicator",
+      "role": "status",
+      "required_states": ["idle", "loading", "success", "error"]
+    },
+    {
+      "test_id": "single-video-player",
+      "role": "video",
+      "required_states": ["idle", "success"]
+    }
+  ],
+  "e2e_verification_fixtures": [
+    "yarn test --testPathPattern 'issue-6-late-subscriber|readiness'",
+    "yarn typecheck"
+  ],
+  "manual_checks": [
+    "TBD(simulator): visual pass of the U2 indicator in example/ (RULE-01..04) is a manual PO/QA check at ship — no browser/simulator oracle available to T0 (example-expo indicator hammered out at GATE L1b D3; not executable by t0-verify)"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}

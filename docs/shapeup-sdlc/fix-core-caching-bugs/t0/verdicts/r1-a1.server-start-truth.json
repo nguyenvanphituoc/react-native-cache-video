@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "round": 1,
+  "attempt": 1,
+  "at": "2026-07-17T09:59:35.217Z",
+  "scope_id": "server-start-truth",
+  "fixtures": [
+    {
+      "cmd": "yarn test --testPathPattern 'server-start|port-retry'",
+      "exit": 0,
+      "pass": true
+    },
+    {
+      "cmd": "yarn typecheck",
+      "exit": 0,
+      "pass": true
+    },
+    {
+      "cmd": "node node_modules/react-native/scripts/generate-codegen-artifacts.js -p . -t all -o ./build/codegen-check",
+      "exit": 0,
+      "pass": true
+    }
+  ],
+  "db_probe": null,
+  "seesaw": {
+    "ran": false,
+    "pass": true,
+    "scopes_checked": [],
+    "failing": []
+  },
+  "fixtures_green": true,
+  "db_probe_green": true,
+  "seesaw_green": true,
+  "overall": "green",
+  "regression": false,
+  "discovered_tasks": []
+}

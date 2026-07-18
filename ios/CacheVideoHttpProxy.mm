@@ -64,7 +64,9 @@ RCT_EXPORT_MODULE(CacheVideoHttpProxy)
 }
 
 RCT_EXPORT_METHOD(start:(double) port
-                  serviceName:(NSString *) serviceName)
+                  serviceName:(NSString *) serviceName
+                  resolve:(RCTPromiseResolveBlock) resolve
+                  reject:(RCTPromiseRejectBlock) reject)
 {
     RCTLogInfo(@"Running HTTP bridge server: %ld", (long)port);
 
@@ -77,8 +79,21 @@ RCT_EXPORT_METHOD(start:(double) port
     }
 
     // Async dispatch only: TurboModule methods may already run on the main
-    // thread, where a synchronous hop onto main deadlocks (INV-04).
+    // thread, where a synchronous hop onto main deadlocks (INV-04). The
+    // promise settles exactly once, from inside this block — RCT promise
+    // blocks are safe to invoke from any thread.
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Retry-safe repeat start: stop and release any previous instance
+        // before creating a new one — reassigning without stopping leaks a
+        // running server (contract: native-start.contract.md).
+        if (_webServer != nil) {
+            if (_webServer.isRunning) {
+                [_webServer stop];
+            }
+            [_webServer removeAllHandlers];
+            _webServer = nil;
+        }
+
         _webServer = [[GCDWebServer alloc] init];
 
         [self initResponseReceivedFor:_webServer forType:@"POST"];
@@ -86,7 +101,28 @@ RCT_EXPORT_METHOD(start:(double) port
         [self initResponseReceivedFor:_webServer forType:@"GET"];
         [self initResponseReceivedFor:_webServer forType:@"DELETE"];
 
-        [_webServer startWithPort:(NSUInteger)port bonjourName:serviceName];
+        // startWithOptions:error: — same bind as startWithPort:bonjourName:,
+        // but surfaces a reasoned NSError instead of a discarded BOOL.
+        NSMutableDictionary* options = [NSMutableDictionary dictionary];
+        options[GCDWebServerOption_Port] = @((NSUInteger)port);
+        if (serviceName != nil) {
+            options[GCDWebServerOption_BonjourName] = serviceName;
+        }
+
+        NSError* error = nil;
+        if ([_webServer startWithOptions:options error:&error]) {
+            // Resolve with the actually-bound port (native truth).
+            resolve(@(_webServer.port));
+        } else {
+            // Failed bind: release the dead instance so a later stop/start
+            // never touches a server that was never running.
+            [_webServer removeAllHandlers];
+            _webServer = nil;
+            NSString* message = error != nil
+                ? error.localizedDescription
+                : [NSString stringWithFormat:@"Failed to bind HTTP bridge server on port %ld", (long)port];
+            reject(@"PORT_BIND_FAILED", message, error);
+        }
     });
 }
 

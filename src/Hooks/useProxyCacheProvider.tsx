@@ -1,9 +1,7 @@
-import React, { createContext, useCallback, useEffect, useRef } from 'react';
-import RNModule from 'react-native';
+import React, { createContext, useEffect, useRef } from 'react';
 
 import { CacheManager } from '../ProxyCacheManager';
 import { useIsForeground } from './useIsForeground';
-import { HLS_CACHING_RESTART } from '../Utils/constants';
 import type { MemoryCachePolicyInterface } from '../types/type';
 import { portGenerate } from '../Utils/util';
 import { isMemoryCachePolicyInterface } from '../user-defined-guard';
@@ -16,10 +14,20 @@ import { isMemoryCachePolicyInterface } from '../user-defined-guard';
  *  Note: passing undefined as a Provider value does not cause consuming components to use defaultValue.
  *  "
  */
+// N8 provider-missing marker (issue #8, round-ledger D5 — non-breaking): the
+// default context still carries a REAL CacheManager so consumers that rely on
+// it keep working, but the marker lets reverseProxyURL name PROVIDER_MISSING
+// instead of a generic warning when no <CacheManagerProvider> is mounted.
+const defaultContextCacheManager = new CacheManager(
+  'react-native-cache-video',
+  __DEV__
+);
+defaultContextCacheManager.isDefaultContext = true;
+
 export const CacheManagerContext = createContext<{
   cacheManager: CacheManager;
 }>({
-  cacheManager: new CacheManager('react-native-cache-video', __DEV__),
+  cacheManager: defaultContextCacheManager,
 });
 CacheManagerContext.displayName = Symbol('CacheManagerContext').toString();
 
@@ -37,12 +45,6 @@ export const CacheManagerProvider = ({
   );
   //
   const isForeground = useIsForeground();
-  //
-  // we dont use state here because we dont want to re-render the component
-  // you should listen HLS_CACHING_RESTART event to get the running port
-  const notifyEvent = useCallback((runningPort: number) => {
-    RNModule.DeviceEventEmitter.emit(HLS_CACHING_RESTART, runningPort);
-  }, []);
 
   useEffect(() => {
     const server = cacheManager.current;
@@ -62,16 +64,23 @@ export const CacheManagerProvider = ({
     const server = cacheManager.current;
     if (isForeground) {
       const port = portGenerate();
-      server.enableBridgeServer(port);
-      setTimeout(() => notifyEvent(port), 1000);
+      // Result-aware start: terminal failure is already observable via
+      // serverState ('failed') + the ServerStartFailed notification, so the
+      // rejection is intentionally not re-thrown into the effect.
+      // RNCV_HLS_CACHING_RESTART is emitted by the CacheManager itself when
+      // (and only when) the native start CONFIRMS the bind — with the ACTUAL
+      // bound port, never a timer-guessed one (UC-ObserveReadiness INV-03).
+      server.enableBridgeServer(port).catch(() => {});
     } else if (!isForeground) {
-      server.disableBridgeServer();
+      // named stop cause → reverseProxyURL warns APP_BACKGROUNDED, not the
+      // generic not-started reason (UC-ResolvePlaybackUrl step 3, issue #8)
+      server.disableBridgeServer('backgrounded');
     }
 
     return () => {
       server.disableBridgeServer();
     };
-  }, [isForeground, notifyEvent]);
+  }, [isForeground]);
 
   return (
     <CacheManagerContext.Provider

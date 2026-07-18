@@ -1,0 +1,27 @@
+{
+  "scope_id": "verified-cache-pipeline",
+  "topology_type": "ICEBERG",
+  "business_goal": "A large mp4 becomes a cache entry only after full verification (download to temp path, size vs Content-Length check, atomic mv promote, register last) and getCachedFileAsync serves verified entries only (temp-suffix files are deleted, never resurrected) — an interrupted download can never crash replay (fixes issue #5; UC-CacheLargeFile + UC-ServeCachedFile, breadboard N9/N10/N11/N12/S2, slice V4).",
+  "tasks": ["TASK-009", "TASK-010", "TASK-014"],
+  "allowed_file_substrate": [
+    "src/Provider/PreCacheProvider.ts",
+    "src/Libs/fileSystem.ts",
+    "src/Libs/session.ts",
+    "src/ProxyCacheManager.ts",
+    "src/__tests__/issue-5-incomplete-file.test.ts",
+    "src/__tests__/verified-cache*.test.*",
+    "src/__tests__/serve-guard*.test.*"
+  ],
+  "shared_substrate": [
+    "src/ProxyCacheManager.ts"
+  ],
+  "affordance_manifest": [],
+  "e2e_verification_fixtures": [
+    "yarn test --testPathPattern 'issue-5-incomplete-file|verified-cache|serve-guard'",
+    "yarn typecheck"
+  ],
+  "manual_checks": [
+    "TBD(manual): ~500MB mp4 cache/replay/interrupt demo (breadboard V4 demo) needs a real device/simulator + CDN — manual PO/QA check at ship, not a jest fixture (not executable by t0-verify)"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}
