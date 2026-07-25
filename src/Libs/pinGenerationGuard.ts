@@ -19,7 +19,15 @@
 
 const pinCount = new Map<string, number>();
 const generation = new Map<string, number>();
-const downloadingKeys = new Set<string>();
+// Refcount, NOT a boolean Set (BUG-5, round-2 EVAL): the write-path keys
+// every segment of one HLS owner under the SAME ownerKey (round-2 BUG-1
+// fix), so two segments of the same owner can be concurrently downloading.
+// A boolean Set means the FIRST segment to settle clears the flag while the
+// SECOND is still in flight, making the owner look evictable mid-download —
+// violating UC-EvictCacheAsset INV-02. Counting acquire/release per key
+// (mirrors pinCount's own refcount pattern) keeps `downloading` true for the
+// entire window ANY constituent segment is still in flight.
+const downloadingCounts = new Map<string, number>();
 
 /** retain(key): pinCount[key] += 1. No effect on generation. Returns the new count. */
 export function retain(key: string): number {
@@ -46,18 +54,37 @@ export function getPinCount(key: string): number {
 /** Marks (or clears) `key` as having an in-flight download — the second
  *  `isEvictable` condition (domain-model INV: `pinCount > 0 OR status ===
  *  'downloading'`). Consumed by verifiedWrite's writeTemp/verifyAndPromote
- *  (TASK-006) around the fetch + verify window. */
+ *  (TASK-006) around the fetch + verify window.
+ *
+ *  REFCOUNTED (BUG-5 fix), same public `(key, boolean)` call signature as
+ *  before — `setDownloading(key, true)` acquires (increments), `false`
+ *  releases (decrements, clamped at 0). `isDownloading` is true while the
+ *  count is > 0. This makes concurrent downloads of the SAME key (e.g. two
+ *  segments of one HLS owner, keyed by the same `ownerKey`) each hold their
+ *  own slot: the owner stays marked downloading until EVERY concurrent
+ *  download for that key has settled, not just the first. A release beyond
+ *  the current acquire count is a clamped no-op (mirrors `release`'s own
+ *  RELEASE_WITHOUT_RETAIN policy) — never throws, never goes negative. */
 export function setDownloading(key: string, downloading: boolean): void {
   if (downloading) {
-    downloadingKeys.add(key);
+    const next = (downloadingCounts.get(key) ?? 0) + 1;
+    downloadingCounts.set(key, next);
   } else {
-    downloadingKeys.delete(key);
+    const next = Math.max(0, (downloadingCounts.get(key) ?? 0) - 1);
+    downloadingCounts.set(key, next);
   }
 }
 
-/** True while `key` is currently marked downloading. */
+/** True while `key` has one or more in-flight downloads (refcount > 0). */
 export function isDownloading(key: string): boolean {
-  return downloadingKeys.has(key);
+  return (downloadingCounts.get(key) ?? 0) > 0;
+}
+
+/** Current downloading refcount for `key` — 0 for a key with no in-flight
+ *  download (no throw). Test/debug surface for the refcount mirrored from
+ *  `getPinCount`. */
+export function getDownloadingCount(key: string): number {
+  return downloadingCounts.get(key) ?? 0;
 }
 
 /** isEvictable(key): false while `pinCount[key] > 0` OR `key` is marked
@@ -100,5 +127,5 @@ export function checkPromote(key: string, promoteGeneration: number): boolean {
 export function __resetPinGenerationGuardForTests(): void {
   pinCount.clear();
   generation.clear();
-  downloadingKeys.clear();
+  downloadingCounts.clear();
 }

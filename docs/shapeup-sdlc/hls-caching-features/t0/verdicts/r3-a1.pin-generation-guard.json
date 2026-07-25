@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "round": 3,
+  "attempt": 1,
+  "at": "2026-07-25T09:05:40.224Z",
+  "scope_id": "pin-generation-guard",
+  "fixtures": [
+    {
+      "cmd": "yarn test --testPathPattern 'pin-cancel'",
+      "exit": 0,
+      "pass": true
+    },
+    {
+      "cmd": "yarn typecheck",
+      "exit": 0,
+      "pass": true
+    }
+  ],
+  "db_probe": null,
+  "seesaw": {
+    "ran": false,
+    "pass": true,
+    "scopes_checked": [],
+    "failing": []
+  },
+  "fixtures_green": true,
+  "db_probe_green": true,
+  "seesaw_green": true,
+  "overall": "green",
+  "regression": false,
+  "discovered_tasks": []
+}

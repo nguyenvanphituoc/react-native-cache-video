@@ -10,8 +10,10 @@ import {
   __resetPinGenerationGuardForTests,
   bumpGeneration,
   checkPromote,
+  getDownloadingCount,
   getGeneration,
   getPinCount,
+  isDownloading,
   isEvictable,
   release,
   retain,
@@ -77,6 +79,83 @@ describe('retain/release — non-negative refcount (baseline)', () => {
     release(KEY);
     expect(getPinCount(KEY)).toBe(0);
     expect(isEvictable(KEY)).toBe(true);
+  });
+});
+
+describe('BUG-5 regression (round-2 EVAL) — downloading is a REFCOUNT, not a boolean flag', () => {
+  it('two concurrent downloads of the SAME owner key: isEvictable stays false until BOTH settle', () => {
+    // Exact repro from EVAL-FEATURE-hls-caching-features.md §3 BUG-5: since
+    // the round-2 BUG-1 fix keys every segment of one HLS owner under the
+    // SAME ownerKey, two segments can be concurrently downloading under one
+    // key. A boolean Set flag lets the FIRST to settle clear the mark for
+    // BOTH, exposing the owner as evictable while the second is still in
+    // flight — violating UC-EvictCacheAsset INV-02.
+    const ownerKey = 'owner-under-test';
+
+    setDownloading(ownerKey, true); // segment A starts
+    setDownloading(ownerKey, true); // segment B starts (concurrent, same owner)
+    expect(getDownloadingCount(ownerKey)).toBe(2);
+    expect(isDownloading(ownerKey)).toBe(true);
+    expect(isEvictable(ownerKey)).toBe(false);
+
+    setDownloading(ownerKey, false); // segment A finishes first
+    // FIXED: B is still in flight — owner must stay non-evictable.
+    expect(getDownloadingCount(ownerKey)).toBe(1);
+    expect(isDownloading(ownerKey)).toBe(true);
+    expect(isEvictable(ownerKey)).toBe(false);
+
+    setDownloading(ownerKey, false); // segment B finishes second
+    // Only NOW, with both settled, is the owner evictable again.
+    expect(getDownloadingCount(ownerKey)).toBe(0);
+    expect(isDownloading(ownerKey)).toBe(false);
+    expect(isEvictable(ownerKey)).toBe(true);
+  });
+
+  it('three concurrent downloads settle in an arbitrary (non-FIFO) order — still tracked correctly', () => {
+    const ownerKey = 'owner-three-segments';
+
+    setDownloading(ownerKey, true); // segment A
+    setDownloading(ownerKey, true); // segment B
+    setDownloading(ownerKey, true); // segment C
+    expect(getDownloadingCount(ownerKey)).toBe(3);
+
+    setDownloading(ownerKey, false); // B settles first (order need not be FIFO)
+    expect(isEvictable(ownerKey)).toBe(false);
+
+    setDownloading(ownerKey, false); // A settles second
+    expect(isEvictable(ownerKey)).toBe(false);
+
+    setDownloading(ownerKey, false); // C settles last
+    expect(getDownloadingCount(ownerKey)).toBe(0);
+    expect(isEvictable(ownerKey)).toBe(true);
+  });
+
+  it('an extra release beyond the acquire count is a clamped no-op — never throws, never negative', () => {
+    const key = 'over-released-key';
+
+    setDownloading(key, true);
+    setDownloading(key, false);
+    expect(() => setDownloading(key, false)).not.toThrow();
+    expect(getDownloadingCount(key)).toBe(0);
+    expect(isEvictable(key)).toBe(true);
+  });
+
+  it('two DIFFERENT owner keys track independent refcounts (no cross-key bleed)', () => {
+    const keyA = 'owner-a';
+    const keyB = 'owner-b';
+
+    setDownloading(keyA, true);
+    setDownloading(keyA, true);
+    setDownloading(keyB, true);
+
+    setDownloading(keyB, false); // B fully settles
+    expect(isEvictable(keyB)).toBe(true);
+    expect(isEvictable(keyA)).toBe(false); // A unaffected by B's release
+
+    setDownloading(keyA, false);
+    expect(isEvictable(keyA)).toBe(false); // one of two A downloads still in flight
+    setDownloading(keyA, false);
+    expect(isEvictable(keyA)).toBe(true);
   });
 });
 
