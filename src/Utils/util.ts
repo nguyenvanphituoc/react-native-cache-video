@@ -6,6 +6,7 @@ import {
   QUERY_ORIGIN_PATH,
   VIDEO_EXTENSIONS,
 } from './constants';
+import * as CacheKeyPolicy from './cacheKeyPolicy';
 
 //
 export const isNull = (data: any) => {
@@ -169,30 +170,19 @@ export function hashFileName(fileName: string) {
   // return (firstHash + secondHash).toUpperCase();
 }
 
+// TASK-003 (UC-NormalizeCacheKey): retained ONLY as a backward-compatible
+// wrapper — every production call site now derives keys/paths via
+// `CacheKeyPolicy.keyFor`/`filePathFor` directly (src/Utils/cacheKeyPolicy.ts).
+// This used to hash `resourceURL.pathname` ALONE (never the host, a
+// cross-origin collision risk — util.ts:179) and had no try/catch around the
+// URL parse (a raw `%` threw). Both gaps are fixed inside CacheKeyPolicy;
+// this wrapper delegates so no caller derives a key independently.
 export function cacheKey(
   resourceStr: string,
   folder: string,
   prefix: string = ''
 ): string {
-  const resourceURL = new URL(decodeURIComponent(resourceStr));
-  const fileExt = getExtensionIfNeed(resourceURL.href);
-  const hashedFileName = hashFileName(resourceURL.pathname);
-
-  const filePath = `${folder}${
-    isNull(prefix) ? '' : prefix + '-'
-  }${hashedFileName}.${fileExt}`;
-
-  return filePath;
-}
-
-export function getCacheKey(
-  urlStr: string,
-  folder: string,
-  prefix: string = ''
-): { originURL: URL; cacheKey: string } {
-  const decodeUrl = new URL(decodeURIComponent(urlStr));
-  const cacheKeyStr = cacheKey(urlStr, folder, prefix);
-  return { originURL: decodeUrl, cacheKey: cacheKeyStr };
+  return CacheKeyPolicy.filePathFor(resourceStr, folder, prefix);
 }
 
 export function pathReplaceLast(url: string, newPath: string): string {

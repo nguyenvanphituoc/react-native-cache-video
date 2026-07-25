@@ -6,7 +6,8 @@ import type {
   SessionTaskInterface,
 } from '../types/type';
 import { KEY_PREFIX, SIGNAL_NOT_DOWNLOAD_ACTION } from '../Utils/constants';
-import { cacheKey, getCacheKey, isHLSUrl, isMediaUrl } from '../Utils/util';
+import { isHLSUrl, isMediaUrl } from '../Utils/util';
+import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
 import { FileSystemManager, tempCachePathFor } from '../Libs/fileSystem';
 
 import type { FetchBlobResponse, StatefulPromise } from '../Libs/session';
@@ -81,7 +82,9 @@ export class PreCacheProvider implements PreCacheInterface {
   async preCacheForList(urls: string[]) {
     // check cached file exist or not
     const existCache = (url: string) =>
-      this.delegate?.existsFile(cacheKey(url, this.cacheFolder, KEY_PREFIX));
+      this.delegate?.existsFile(
+        CacheKeyPolicy.filePathFor(url, this.cacheFolder, KEY_PREFIX)
+      );
     // filter empty url
     const validUrls = urls.filter((url) => url.length > 0);
     // check cached file exist or not
@@ -217,7 +220,11 @@ export class PreCacheProvider implements PreCacheInterface {
   // against Content-Length, atomically promote temp → final, register LAST.
   // Anything unverified is discarded — the final cache path is never touched.
   private async prepareSourceMedia(url: string): Promise<string> {
-    const { originURL, cacheKey: finalCachePath } = getCacheKey(
+    // originURL: the decoded, normalized request target (used for the actual
+    // fetch + in-flight bookkeeping below) — separate from finalCachePath,
+    // which now derives via CacheKeyPolicy (UC-NormalizeCacheKey).
+    const originURL = new URL(decodeURIComponent(url));
+    const finalCachePath = CacheKeyPolicy.filePathFor(
       url,
       this.cacheFolder,
       KEY_PREFIX

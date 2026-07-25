@@ -105,14 +105,13 @@ import {
 import { SimpleSessionProvider, type Encoding } from './Libs/session';
 import {
   absoluteFilePath,
-  cacheKey,
-  getCacheKey,
   getOriginURL,
   isHLSUrl,
   portGenerate,
   reverseProxyPlaylist,
   reverseProxyURL,
 } from './Utils/util';
+import * as CacheKeyPolicy from './Utils/cacheKeyPolicy';
 
 import { MemoryCacheProvider } from './Provider/MemoryCacheProvider';
 import { BridgeServer } from './Libs/httpProxy';
@@ -209,22 +208,20 @@ export class CacheManager
     return this._storage.getBucketFolder(FileBucket.cache);
   }
   // - MARK: CacheManager section
+  // UC-NormalizeCacheKey: `key` (the memory-cache identity) and `cacheKeyStr`
+  // (the disk path) both now derive from CacheKeyPolicy — a CDN re-sign of
+  // `forKey` folds to the SAME `key`, fixing the old `originURL.href` (full
+  // signed URL) identity bug.
   private putCachedFile(forKey: string, folder: string) {
     //
-    const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
-      forKey,
-      folder,
-      KEY_PREFIX
-    );
-    const key = originURL.href;
+    const key = CacheKeyPolicy.keyFor(forKey);
+    const cacheKeyStr = CacheKeyPolicy.filePathFor(forKey, folder, KEY_PREFIX);
 
     this._memoryCache?.put(key, cacheKeyStr);
   }
 
-  getCachedFile(forKey: string, folder: string = this.cacheFolder) {
-    const { originURL } = getCacheKey(forKey, folder, KEY_PREFIX);
-    // return this.lruCachedLocalFiles[originURL.href];
-    const key = originURL.href;
+  getCachedFile(forKey: string, _folder: string = this.cacheFolder) {
+    const key = CacheKeyPolicy.keyFor(forKey);
     return this._memoryCache?.get(key);
   }
 
@@ -242,11 +239,8 @@ export class CacheManager
       return undefined;
     }
 
-    const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
-      url,
-      folder,
-      KEY_PREFIX
-    );
+    const key = CacheKeyPolicy.keyFor(url);
+    const cacheKeyStr = CacheKeyPolicy.filePathFor(url, folder, KEY_PREFIX);
 
     // Check memory cache first
     const cachedKey = this.getCachedFile(url);
@@ -256,7 +250,7 @@ export class CacheManager
         return cachedKey;
       } else {
         // STALE_ENTRY: registered but file gone — evict, degrade to origin
-        this._memoryCache?.syncCache(originURL.href);
+        this._memoryCache?.syncCache(key);
         return undefined;
       }
     }
@@ -266,8 +260,8 @@ export class CacheManager
     // re-registered; a temp-convention path is never served.
     if (!isTempCachePath(cacheKeyStr)) {
       if (await this._storage.existsFile(cacheKeyStr)) {
-        this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
-        this.getCachedFile(originURL.href);
+        this._memoryCache?.syncCache(key, cacheKeyStr);
+        this.getCachedFile(url);
         return cacheKeyStr;
       }
     }
@@ -282,7 +276,7 @@ export class CacheManager
     }
 
     // remove reference if need
-    this._memoryCache?.syncCache(originURL.href);
+    this._memoryCache?.syncCache(key);
 
     return undefined;
   }
@@ -324,9 +318,11 @@ export class CacheManager
       return;
     }
 
-    // Get the original URL (needed as the key for memory cache)
-    const { originURL } = getCacheKey(url, this.cacheFolder, KEY_PREFIX);
-    const key = originURL.href;
+    // UC-NormalizeCacheKey consistency: `_memoryCache` is keyed by
+    // CacheKeyPolicy.keyFor(url) (matches putCachedFile/getCachedFile) — the
+    // old `originURL.href` derivation here would silently miss the entry
+    // once the keying scheme changed.
+    const key = CacheKeyPolicy.keyFor(url);
 
     // First get the cached file path
     const cachedPath = await this.getCachedFileAsync(url);
@@ -334,10 +330,11 @@ export class CacheManager
     // Clean up memory cache/policy regardless of file existence
     this._memoryCache.syncCache(key);
 
-    // If we had a cached path, try to delete the file
+    // If we had a cached path, try to delete the file. didEvictHandler needs
+    // the ORIGINAL url (not the hashed key) to tell HLS vs. media apart.
     if (cachedPath) {
       try {
-        await this.didEvictHandler(key, cachedPath);
+        await this.didEvictHandler(url, cachedPath);
       } catch (error) {
         // Still succeeded in cleaning cache/policy even if file deletion failed
       }
@@ -402,17 +399,14 @@ export class CacheManager
 
   // - MARK: PreCacheDelegate
   async onCachingPlaylistSource(forUrl: string, data: any, folder: string) {
-    const { originURL, cacheKey: cacheKeyStr } = getCacheKey(
-      forUrl,
-      folder,
-      KEY_PREFIX
-    );
+    const key = CacheKeyPolicy.keyFor(forUrl);
+    const cacheKeyStr = CacheKeyPolicy.filePathFor(forUrl, folder, KEY_PREFIX);
 
     if (data === SIGNAL_NOT_DOWNLOAD_ACTION) {
       // this fetch from exist check
       // silently save to cache
       // because it pre-cache
-      this._memoryCache?.syncCache(originURL.href, cacheKeyStr);
+      this._memoryCache?.syncCache(key, cacheKeyStr);
     } else {
       // this download and need manually save
       // new file downloaded
@@ -424,8 +418,12 @@ export class CacheManager
     }
   }
 
+  // Consistency note: `_memoryCache` is now keyed by `CacheKeyPolicy.keyFor`
+  // (not the raw url), matching putCachedFile/getCachedFile — `contain` must
+  // hash `forKey` the same way or membership checks silently mismatch.
   contain(forKey: string) {
-    return this._memoryCache ? this._memoryCache?.has(forKey) : false;
+    const key = CacheKeyPolicy.keyFor(forKey);
+    return this._memoryCache ? this._memoryCache?.has(key) : false;
   }
 
   existsFile(forKey: string) {
@@ -565,7 +563,11 @@ export class CacheManager
         async (req: RequestInterface, res: ResponseInterface) => {
           const urlStr = getOriginURL(req.url, this.runningPort!);
 
-          let filePath = cacheKey(urlStr ?? '', this.cacheFolder, KEY_PREFIX);
+          let filePath = CacheKeyPolicy.filePathFor(
+            urlStr ?? '',
+            this.cacheFolder,
+            KEY_PREFIX
+          );
           if (!urlStr) {
             return res.send(400, 'text/plain', 'Bad Request');
           }

@@ -2,14 +2,9 @@
   "schema_version": 1,
   "round": 1,
   "attempt": 1,
-  "at": "2026-07-25T05:12:55.432Z",
-  "scope_id": "cache-key-identity",
+  "at": "2026-07-25T04:54:48.297Z",
+  "scope_id": "shared-cache-types",
   "fixtures": [
-    {
-      "cmd": "yarn test --testPathPattern 'cache-key-policy|signature-rotation'",
-      "exit": 0,
-      "pass": true
-    },
     {
       "cmd": "yarn typecheck",
       "exit": 0,
