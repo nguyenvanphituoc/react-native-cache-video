@@ -117,6 +117,10 @@ import * as CacheKeyPolicy from './Utils/cacheKeyPolicy';
 import { MemoryCacheProvider } from './Provider/MemoryCacheProvider';
 import { BridgeServer } from './Libs/httpProxy';
 import { PreCacheProvider } from './Provider/PreCacheProvider';
+import type {
+  SetActiveWindowOpts,
+  PrefetchWindowChangedPayload,
+} from './Provider/PrefetchWindow';
 import { bumpGeneration, getGeneration } from './Libs/pinGenerationGuard';
 // TASK-007/008 (round-ledger D4): CacheFileRepository (TASK-006,
 // pin-generation-guard scope substrate) is now import-ready — the
@@ -570,6 +574,25 @@ export class CacheManager
 
   async preCacheFor(url: string) {
     return await this._preCache?.preCacheFor(url);
+  }
+
+  // Round-ledger D7: thin public passthrough to TASK-011/012's
+  // PrefetchWindow.setActiveWindow, making usePrefetch's already-wired,
+  // already-tested call (src/Hooks/usePrefetch.ts, TASK-013) LIVE against
+  // the real CacheManager instead of degrading to its documented
+  // feature-detected no-op. `_preCache` stays typed to the narrower
+  // `PreCacheInterface` (no `prefetchWindow` member) — the concrete
+  // instance is always a `PreCacheProvider` (see the constructor above), so
+  // the cast here is safe; `?.` keeps this a no-op if it's ever swapped for
+  // a `PreCacheInterface` implementation without a `prefetchWindow`.
+  setActiveWindow(
+    urls: string[],
+    currentIndex: number,
+    opts?: SetActiveWindowOpts
+  ): PrefetchWindowChangedPayload | undefined {
+    return (
+      this._preCache as PreCacheProvider
+    )?.prefetchWindow?.setActiveWindow(urls, currentIndex, opts);
   }
   // END: PreCache section
 
