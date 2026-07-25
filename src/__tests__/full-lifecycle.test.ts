@@ -25,20 +25,27 @@
  *    hls-ingest-prefetch-forwarder.test.ts).
  *
  *  - D6: prefetched HLS segments are written via the SAME verified-write
- *    primitive/final-path convention as a real playback ingest, but
- *    `PrefetchWindow` has no access to `CacheManager`'s private in-memory
- *    registry — a prefetch-only asset's playlist is never disk-cached or
- *    registered, and a prefetched segment served later via the disk-first
- *    fast path is never (re)registered under its owner either. "Prefetched
- *    item plays from cache" below proves playback continuity DOES hold
- *    (a real cache hit, no re-download) while explicitly and honestly
- *    asserting the registry-visibility consequences the round-ledger
- *    flagged as NOT closed this round: R2/R3 (eviction byte-accounting)
- *    misses the prefetched bytes and LEAKS the file on eviction, and R9
- *    (offline playlist fallback) is blind to a prefetch-only asset. These
- *    assertions describe the CURRENT, real, verified behavior — not a
- *    weakened check that avoids looking — this suite documents the gap
- *    rather than asserting it away.
+ *    primitive/final-path convention as a real playback ingest. Round 2
+ *    (order r2-a1) re-verifies this gap CLOSED by two fixes owned by other
+ *    scopes: BUG-2 (`ProxyCacheManager.addSegmentHandler`'s disk-first
+ *    branch now registers a served segment under its owner even when it
+ *    was never registered before — a prefetch-only file being served for
+ *    the first time) and BUG-3 (`PrefetchWindow.registerPrefetchedPlaylist`,
+ *    reached via the existing `PreCacheDelegate` seam, registers the
+ *    prefetched PLAYLIST itself as a real `kind:'hls'` owner the moment
+ *    it's fetched — "the same way a played one is"). "Prefetched item
+ *    plays from cache" below re-verifies playback continuity (a real cache
+ *    hit, no re-download) AND that R2/R3 byte-accounting now sees the
+ *    served segment and no file leaks on removal. "R9 blind spot" is
+ *    re-verified FIXED: an origin-down first playlist request for a
+ *    prefetch-only asset now gets the SAME 200 STALE-FALLBACK an
+ *    already-played asset gets. One residual gap surfaced while
+ *    re-verifying is asserted directly, not hidden (see discoveries[] in
+ *    the WorkResult): the stale-fallback body served for a prefetch-only
+ *    asset is `registerPrefetchedPlaylist`'s RAW, un-rewritten origin
+ *    playlist text — unlike a played asset's cached file, which IS
+ *    rewritten (`reverseProxyPlaylist`) to point every segment URI at the
+ *    local proxy BEFORE ever being written to disk.
  */
 import { DeviceEventEmitter } from 'react-native';
 import { CacheManager, CACHE_STATUS_EVENT } from '../ProxyCacheManager';
@@ -423,7 +430,7 @@ describe('Stage 4 — remove-mid-download: a live-playlist re-poll in flight is 
     expect(secondRes.calls[0]?.code).toBe(502); // no cache to fall back to — owner was just removed
   });
 
-  it("[discovery — reported via WorkResult discoveries, distinct from D6/D7] addSegmentHandler's generation guard is keyed by the SEGMENT (segmentKey), but the generation VALUE it checks is captured from the OWNER (ownerKey) — since bumpGeneration is only ever called on owner-level keys (eviction, removeCachedVideo), a segment key's own generation counter never moves, so a segment fetch still in flight when its owner is removed mid-download still verifies + promotes to disk: the registry correctly stays clean (registerSegmentUnderOwner's own owner-presence guard stops re-registration), but the file itself is an untracked leak on disk", async () => {
+  it("removeCachedVideo mid-flight also discards a segment fetch already in flight for that owner (BUG-1 fix, r2-a1): both writeTemp's downloading-mark and verifyAndPromote's checkPromote guard now key consistently on the OWNER throughout the temp-write/verify window, so the late-arriving segment write is discarded — no untracked file is left on disk (R4, no resurrection)", async () => {
     const manager = new CacheManager(
       'lifecycle-remove-mid-segment-discovery',
       true
@@ -491,10 +498,13 @@ describe('Stage 4 — remove-mid-download: a live-playlist re-poll in flight is 
     });
     await waitForResponse(segRes);
 
-    // Documented, verified CURRENT behavior (not asserted away): the file IS
-    // promoted to the final path despite the owner having been removed.
-    expect(BlobUtilMock.__hasFile(segmentFilePath)).toBe(true); // LEAKED
-    expect(manager.memoryCache?.has(ownerKey)).toBe(false); // registry itself correctly stayed absent
+    // BUG-1 fix, verified: writeTemp's downloading-mark AND
+    // verifyAndPromote's checkPromote guard both now key off `ownerKey`
+    // (ProxyCacheManager.ts addSegmentHandler) — removeCachedVideo already
+    // bumped the OWNER's generation before this late write settles, so the
+    // stale-generation check correctly discards the promote. No leaked file.
+    expect(BlobUtilMock.__hasFile(segmentFilePath)).toBe(false); // NOT leaked — R4 holds
+    expect(manager.memoryCache?.has(ownerKey)).toBe(false); // registry stayed absent, as before
   });
 });
 
@@ -651,13 +661,13 @@ describe('Stage 6 — window prefetch warms upcoming items and cancels the one s
 // Stage 7 — a prefetched item plays from cache; the D6 registry-visibility
 // gap is exercised and documented HONESTLY, not hidden.
 // ---------------------------------------------------------------------------
-describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibility gap (R2/R3/R9) is exercised and documented, not asserted away', () => {
+describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibility gap (R2/R3/R9) is re-verified CLOSED by the round-2 fixes (BUG-2/BUG-3), plus a residual port-rewrite gap surfaced along the way', () => {
   beforeEach(() => {
     resetTestHarness();
     __resetPinGenerationGuardForTests();
   });
 
-  it('playback continuity DOES hold (no re-download) for a prefetched segment; R2/R3 byte-accounting is CONFIRMED blind and the file LEAKS on later removal (round-ledger D6)', async () => {
+  it('playback continuity DOES hold (no re-download) for a prefetched segment; R2/R3 byte-accounting now SEES the served segment (BUG-2 fix) and no file leaks on later removal (round-ledger D6 closed)', async () => {
     const manager = new CacheManager(
       'lifecycle-prefetch-plays-from-cache',
       true
@@ -704,10 +714,17 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
     // PrefetchWindow → real CacheFileRepository — nothing here was mocked.
     expect(BlobUtilMock.__hasFile(seg0Path)).toBe(true);
 
-    // D6, part 1 (registry visibility): the prefetch never registered an
-    // owner — the playlist was fetched+parsed but never disk-cached or
-    // registered (round-ledger D6; PrefetchWindow.ts's own header note).
-    expect(manager.memoryCache?.has(ownerKey)).toBe(false);
+    // D6, part 1 (registry visibility — CLOSED, BUG-3 fix): the prefetch's
+    // OWN playlist fetch now registers a real `kind:'hls'` owner via
+    // PrefetchWindow.registerPrefetchedPlaylist (the PreCacheDelegate seam),
+    // the moment the playlist text is fetched+verified+promoted — before
+    // any segment is ever ingested.
+    expect(manager.memoryCache?.has(ownerKey)).toBe(true);
+    const ownerAfterPrefetch = manager.memoryCache?.get(ownerKey) as any;
+    expect(ownerAfterPrefetch.kind).toBe('hls');
+    expect(typeof ownerAfterPrefetch.playlistPath).toBe('string');
+    expect(ownerAfterPrefetch.segmentPaths).toEqual([]); // segments aren't (re)registered by the prefetch itself
+    expect(ownerAfterPrefetch.bytes).toBeGreaterThan(0);
 
     // Now simulate PLAYBACK actually starting: the playlist is ingested for
     // real (a fresh origin fetch — it was never disk-cached by the prefetch).
@@ -740,27 +757,26 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
       fetchCallsBefore
     );
 
-    // D6, part 2 (R2/R3 byte-accounting blind spot) — CONFIRMED, not
-    // asserted away: addSegmentHandler's disk-first branch serves an
-    // already-on-disk file WITHOUT registering it under the owner (that
-    // branch's own comment — "already on disk (repeat request) — served
-    // from cache, no re-registration, no double count" — was written for a
-    // TRUE repeat of an already-registered segment; here the segment was
-    // NEVER registered in the first place, so this is not a repeat-request
-    // optimization, it's the D6 gap made concrete).
+    // D6, part 2 (R2/R3 byte-accounting blind spot — CLOSED, BUG-2 fix):
+    // addSegmentHandler's disk-first branch now registers the served file
+    // under its owner when one exists (ProxyCacheManager.ts, addSegmentHandler
+    // disk-hit branch), even though this exact segment was never registered
+    // by a prior request — no longer a silent blind spot, this is a real
+    // (idempotent) registration, verified below by the populated
+    // segmentPaths/bytes.
     const ownerAfterServe = manager.memoryCache?.get(ownerKey) as any;
-    expect(ownerAfterServe.segmentPaths).toEqual([]); // still invisible to the registry
-    expect(ownerAfterServe.bytes).toBe(bytesAfterPlaylistOnly); // byte accounting never moved
+    expect(ownerAfterServe.segmentPaths).toEqual([seg0Path]); // NOW visible to the registry
+    expect(ownerAfterServe.bytes).toBeGreaterThan(bytesAfterPlaylistOnly); // byte accounting moved
 
-    // D6, part 3 (R2/R3 consequence — a real leaked file on removal): since
-    // the owner's registry entry never accounted for this segment, removing
-    // the owner does NOT clean it up.
+    // D6, part 3 (R2/R3 consequence — CLOSED, BUG-2 fix): the owner's
+    // registry entry now DOES account for this segment, so removing the
+    // owner cleans it up like any other tracked segment — no leak.
     await manager.removeCachedVideo(PLAYLIST_URL);
     expect(manager.memoryCache?.has(ownerKey)).toBe(false);
-    expect(BlobUtilMock.__hasFile(seg0Path)).toBe(true); // LEAKED — R2/R3 genuinely fails here
+    expect(BlobUtilMock.__hasFile(seg0Path)).toBe(false); // NOT leaked — R2/R3 holds
   }, 15000);
 
-  it('R9 blind spot — CONFIRMED: an origin-down FIRST playlist request for a prefetch-ONLY asset gets no offline fallback, even though its segment already sits verified on disk', async () => {
+  it('R9 FIXED — CONFIRMED: an origin-down FIRST playlist request for a prefetch-ONLY asset now gets the 200 STALE-FALLBACK an already-played asset gets (BUG-3 fix); one residual gap surfaces and is asserted directly, not hidden — the served body is the RAW, un-rewritten origin playlist text, not proxy-rewritten', async () => {
     const manager = new CacheManager('lifecycle-prefetch-r9-blind', true);
     manager.enableMemoryCache(new FreePolicy());
     await manager.enableBridgeServer(52108);
@@ -791,7 +807,12 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
       segmentCount: 1,
     });
     await waitFor(() => BlobUtilMock.__hasFile(seg0Path));
-    expect(manager.memoryCache?.has(ownerKey)).toBe(false); // never registered (D6)
+    // D6 CLOSED (BUG-3 fix): the prefetch's own playlist fetch registered a
+    // real `kind:'hls'` owner via PrefetchWindow.registerPrefetchedPlaylist.
+    expect(manager.memoryCache?.has(ownerKey)).toBe(true);
+    const ownerAfterPrefetch = manager.memoryCache?.get(ownerKey) as any;
+    expect(ownerAfterPrefetch.kind).toBe('hls');
+    expect(typeof ownerAfterPrefetch.playlistPath).toBe('string');
 
     // now the player tries to play it for the FIRST time — origin is down
     BlobUtilMock.__setFetchError(new Error('origin unreachable'));
@@ -803,12 +824,32 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
       res
     );
 
-    // R9 CONFIRMED BLIND for a prefetch-only asset: no owner entry exists to
-    // fall back to, despite the segment already sitting verified on disk —
-    // 502, not the 200 STALE-FALLBACK Stage 5's already-played asset gets.
-    expect(res.calls).toEqual([
-      { method: 'send', code: 502, body: 'ORIGIN_UNREACHABLE_NO_CACHE' },
-    ]);
+    // R9 FIXED for a prefetch-only asset: the registered owner IS found by
+    // respondWithCachedPlaylistOrError, so this now gets the SAME 200
+    // STALE-FALLBACK Stage 5's already-played asset gets, not a 502.
+    expect(res.calls).toHaveLength(1);
+    expect(res.calls[0]?.method).toBe('send');
+    expect(res.calls[0]?.code).toBe(200);
+
+    // Residual gap — NOT hidden, asserted directly (see the WorkResult
+    // discoveries[] entry too): the served fallback body for a
+    // PREFETCH-ONLY asset is registerPrefetchedPlaylist's RAW origin
+    // playlist text, written straight to disk with NO reverseProxyPlaylist
+    // rewrite ever applied — unlike a real ingest via addPlaylistHandler,
+    // which rewrites every segment URI to point at the local proxy (via
+    // `LOCALHOST` = 'http://127.0.0.1', Utils/constants.ts) BEFORE ever
+    // writing to disk (see Stage 5's cachedBody, which IS the rewritten
+    // form). A player resolving THIS body's segment reference would resolve
+    // it against whatever base URL it fetched the playlist from, not
+    // necessarily land back on this proxy's own segment route.
+    const Buffer = require('buffer').Buffer;
+    const decodedFallbackBody = Buffer.from(
+      res.calls[0]?.body ?? '',
+      'base64'
+    ).toString('utf8');
+    const rawOriginText = playlist(['seg0.ts']);
+    expect(decodedFallbackBody).toBe(rawOriginText); // RAW, un-rewritten origin text
+    expect(decodedFallbackBody).not.toContain('127.0.0.1'); // proxy rewrite never ran
   }, 15000);
 });
 
