@@ -4,10 +4,10 @@ Support cache video type when playing in Video component
 
 - [x] Download and read video/ hls video from cache
 - [x] Cache policy for video for number of video in file system
-- [ ] Cache policy for hls video
-- [ ] hls caching for dynamic url ( cloudfront)
+- [x] Cache policy for hls video
+- [x] hls caching for dynamic url ( cloudfront)
 - [x] Byte-Range Support for Segments
-- [ ] Pre caching for list/ while scrolling
+- [x] Pre caching for list/ while scrolling
 
 ## Requirements
 
@@ -22,6 +22,14 @@ Support cache video type when playing in Video component
 > **Library floor vs. example toolchain:** the published library still supports **RN >= 0.76** (its minimum is unchanged). The bundled `example/` app is pinned to **RN 0.81.6** so it builds under **Xcode 26.4** (iOS 26 SDK) and the current Android 16 / AGP 8.11 toolchain — see the changelog note below.
 
 ## Changelog
+
+### 0.5.0 — HLS cache policy, signed-URL caching, list pre-caching, evict-cancel
+
+- **HLS caching for dynamic URLs (CloudFront):** new `CacheKeyPolicy` — cache identity strips known signing params by default (`Expires`, `Signature`, `Key-Pair-Id`, `Policy`, `X-Amz-*`, `token`; other query params are kept), with `queryAllowlist`/`stripQuery`/`urlKeyExtractor` options and a fail-safe fallback to the original URL. Re-signed URLs now hit the cache instead of re-downloading.
+- **Cache policy for HLS:** registry v2 groups an HLS asset (playlist + its segments, incl. byte-range variants) into one `CacheEntry` with byte totals; `LFUSizePolicy` accounts and evicts whole assets (no more unbounded segment growth). Cached playlists also serve as an offline fallback (rewritten with the live proxy port at serve time).
+- **Cancel on evict/remove:** in-use assets are pin-refcounted against eviction; a generation guard prevents an evicted/removed asset's in-flight download from resurrecting it; `removeCachedVideo`/`clearCache` cancel in-flight downloads; all writes go through a verified temp→check→promote path; proxy requests always terminate with a response.
+- **Pre-caching for lists:** `CacheManager.setActiveWindow(urls, currentIndex, opts)` + `usePrefetch()` hook — distance-sorted sliding-window prefetch (`ahead`/`behind`/`hlsSegments`), HLS items warm the playlist + first N segments, items leaving the window are cancelled, and prefetch never competes with active playback. Reference wiring in `example/` (`VideoList`).
+- **Upgrade note (soft breaks):** the persisted cache registry is versioned; a pre-0.5.0 registry is discarded on first load and orphaned `react-native-cache-video-*` files are swept (one-time re-download). Custom `MemoryCachePolicyInterface`/`MemoryCacheDelegate` implementations now receive `CacheEntry` values (helpers exported) and the registry `export()` shape changed. The documented public API (`useAsyncCache`, `CacheManagerProvider`, policies, `preCacheFor`/`preCacheForList`) is unchanged.
 
 ### 0.4.0 — New Architecture migration (breaking)
 
@@ -213,7 +221,7 @@ See the [contributing guide](CONTRIBUTING.md) to learn how to contribute to the 
 
 ## Known Bugs and Future Fixes
 
-- [ ] Cancel mechanism when cache evict
+- [x] Cancel mechanism when cache evict
 - [x] crash when enter background suddenly
 
 Here is a list of known bugs and issues that we plan to fix in the future:
