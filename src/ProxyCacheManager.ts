@@ -117,6 +117,7 @@ import * as CacheKeyPolicy from './Utils/cacheKeyPolicy';
 import { MemoryCacheProvider } from './Provider/MemoryCacheProvider';
 import { BridgeServer } from './Libs/httpProxy';
 import { PreCacheProvider } from './Provider/PreCacheProvider';
+import { bumpGeneration } from './Libs/pinGenerationGuard';
 
 // - MARK: Asset registry v2 (TASK-004, UC-IngestHlsPlaylist/UC-EvictCacheAsset)
 // `version: 2` is the first version-tagged persisted-registry format — any
@@ -368,7 +369,25 @@ export class CacheManager
     }
   }
 
+  // TASK-010 (UC-RemoveCacheAsset step 2): registry keys currently held —
+  // read via export() (no cachePolicy onAccess/onEvict side effects, unlike
+  // get()) so enumerating keys to cancel/bump never itself triggers eviction.
+  private registryKeys(): string[] {
+    return (this._memoryCache?.export().lruCachedLocalFiles ?? []).map(
+      ([key]) => key
+    );
+  }
+
   async clearCache(): Promise<void> {
+    // TASK-010 (UC-RemoveCacheAsset step 2): bump every registered key's
+    // generation and cancel every in-flight download BEFORE the existing
+    // full-directory wipe — repeats step 1's bumpGeneration+cancel for every
+    // key currently in the registry. `disableBridgeServer`'s own
+    // full-teardown cancelAllTask (:637-638) is unchanged; this ADDS
+    // per-clear cancellation, it does not replace it.
+    this.registryKeys().forEach((key) => bumpGeneration(key));
+    this._sessionTask?.cancelAllTask();
+
     // Clear memory cache and policy
     this.clearMemoryCache();
 
@@ -378,23 +397,33 @@ export class CacheManager
   }
 
   async removeCachedVideo(url: string): Promise<void> {
-    if (!this._memoryCache) {
-      return;
-    }
-
     // UC-NormalizeCacheKey consistency: `_memoryCache` is keyed by
     // CacheKeyPolicy.keyFor(url) (matches putCachedFile/getCachedFile) — the
     // old `originURL.href` derivation here would silently miss the entry
     // once the keying scheme changed.
     const key = CacheKeyPolicy.keyFor(url);
 
+    // TASK-010 (UC-RemoveCacheAsset step 1b-c): bump generation THEN cancel
+    // any in-flight download for this key BEFORE unlinking/unregistering —
+    // closes README:216's cancel gap. Runs unconditionally (even for a key
+    // with no registry entry yet, e.g. an in-flight download that hasn't
+    // verified/registered — a download can be pinned/downloading before its
+    // asset is registered): bumpGeneration on an unseen key just starts its
+    // generation counter, and cancelTask on a URL with no in-flight task is
+    // already a documented no-op (session.ts:53-62) — this is what closes
+    // the no-resurrection race even when the download raced registration.
+    bumpGeneration(key);
+    this._sessionTask?.cancelTask(url);
+
+    if (!this._memoryCache) {
+      return;
+    }
+
     // First get the cached file path
     const cachedPath = await this.getCachedFileAsync(url);
     // TASK-009 retargeted didEvictHandler from a bare filePath string to the
     // full CacheEntry (kind-branching) — captured BEFORE syncCache removes
-    // it below. (Generation-bump on explicit removal is TASK-010, out of
-    // this scope's substrate — this call site only stays type/behavior
-    // consistent with the new didEvictHandler signature.)
+    // it below.
     const entry = this._memoryCache.get(key);
 
     // Clean up memory cache/policy regardless of file existence
