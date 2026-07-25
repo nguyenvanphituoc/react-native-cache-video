@@ -836,8 +836,22 @@ export class CacheManager
   // when the origin is unreachable; otherwise 502 ORIGIN_UNREACHABLE_NO_CACHE.
   // Always terminates the request (R10) — this is itself one of the
   // always-respond branches, never throws past this point.
+  //
+  // BUG-4 fix (r3-a2, DW-7/R9): the file on disk holds the RAW, un-rewritten
+  // origin playlist text — by design, port-independent, since the bridge
+  // server's port is ephemeral per session (BUG-1, r1-a2 port-range fix) and
+  // `PrefetchWindow.registerPrefetchedPlaylist` (out of this scope's
+  // substrate) writes to this IDENTICAL final path
+  // (`CacheKeyPolicy.filePathFor`) in that same raw form. `addPlaylistHandler`
+  // below now stores the same raw form for a played asset too, so this is
+  // the ONE shared serve path for both cases: rewrite segment URIs to the
+  // CURRENT running port via `reverseProxyPlaylist` — the exact transform
+  // `addPlaylistHandler` runs on a fresh origin fetch — before ever sending
+  // a cached-fallback body. Byte-equivalent to a fresh rewritten playlist
+  // (same raw text + same port -> same output).
   private async respondWithCachedPlaylistOrError(
     key: string,
+    forUrl: string,
     reverseRes: ResponseInterface
   ): Promise<void> {
     const entry = this._memoryCache?.get(key);
@@ -845,12 +859,11 @@ export class CacheManager
     if (entry && entry.kind === 'hls' && entry.playlistPath) {
       const exists = await this._storage.existsFile(entry.playlistPath);
       if (exists) {
-        // TASK-007: the file on disk holds the REWRITTEN playlist as plain
-        // utf8 text (see addPlaylistHandler) — re-encode to base64 so the
-        // served body is byte-identical to what a fresh ingest would send.
         const rawText = await this._storage.read(entry.playlistPath, 'utf8');
         const Buffer = require('buffer').Buffer;
-        const cachedBody = Buffer.from(rawText, 'utf8').toString('base64');
+        const rawBase64 = Buffer.from(rawText, 'utf8').toString('base64');
+        const port = this.runningPort!;
+        const cachedBody = reverseProxyPlaylist(rawBase64, forUrl, port);
         this.emitCacheStatus(key, 'STALE-FALLBACK');
         reverseRes.send(200, HLS_CONTENT_TYPE, cachedBody);
         return;
@@ -870,18 +883,25 @@ export class CacheManager
   // UNBLOCKED (round-ledger D4): CacheFileRepository.verifyAndPromote
   // (TASK-006) closes the temp-then-atomic-promote gap. `writeTemp` itself
   // is NOT used here — it downloads origin bytes STRAIGHT to disk with no
-  // transform hook, but the playlist body must be REWRITTEN (segment URIs
-  // rewritten to the local proxy, `reverseProxyPlaylist`) before it is ever
-  // persisted, so the fetch stays in-memory (unchanged) and only the
-  // temp-write is new. The temp file is written as plain utf8 text (the
-  // decoded playlist, not its base64 wire form) so `contentLength` — a
-  // self-computed value, not the origin's Content-Length (which describes
-  // the UNREWRITTEN bytes and cannot verify a locally-transformed body) —
-  // matches `stat(tempPath).size` exactly on a real device (utf8 byte
-  // count of ASCII m3u8 text) AND under this repo's jest mock (which
-  // measures stored-string length). `verifyAndPromote` still closes the
-  // no-resurrection guard (R4) via the generation captured before the fetch
-  // started.
+  // transform hook, and the fetch stays in-memory (unchanged) so only the
+  // temp-write is new. The temp file is written as plain utf8 text so
+  // `contentLength` — a self-computed value, not the origin's Content-Length
+  // (which would describe a differently-encoded body) — matches
+  // `stat(tempPath).size` exactly on a real device (utf8 byte count of ASCII
+  // m3u8 text) AND under this repo's jest mock (which measures stored-string
+  // length). `verifyAndPromote` still closes the no-resurrection guard (R4)
+  // via the generation captured before the fetch started.
+  //
+  // BUG-4 fix (r3-a2, DW-7/R9): the persisted body is the RAW origin
+  // playlist text, NOT the proxy-rewritten form — segment URIs are only
+  // rewritten (`reverseProxyPlaylist`) transiently, for THIS response
+  // (`playlistStr` below) and again at serve time for any later
+  // cached-fallback serve (`respondWithCachedPlaylistOrError`). Storing raw
+  // text keeps the cached file port-independent (the bridge server's port is
+  // ephemeral per session) and matches
+  // `PrefetchWindow.registerPrefetchedPlaylist`'s already-established raw
+  // convention at the identical final path — one format on disk, one shared
+  // rewrite-at-serve-time path, for both a played and a prefetch-only asset.
   private async addPlaylistHandler(
     forUrl: string,
     filePath: string,
@@ -901,24 +921,40 @@ export class CacheManager
         fetchResult = await this._sessionTask.dataTask(forUrl, { headers });
       } catch (fetchError) {
         // origin fetch threw (network/timeout) — same as an explicit `error`
-        return await this.respondWithCachedPlaylistOrError(key, reverseRes);
+        return await this.respondWithCachedPlaylistOrError(
+          key,
+          forUrl,
+          reverseRes
+        );
       }
 
       const { data, error, ...response } = fetchResult;
       if (error) {
-        return await this.respondWithCachedPlaylistOrError(key, reverseRes);
+        return await this.respondWithCachedPlaylistOrError(
+          key,
+          forUrl,
+          reverseRes
+        );
       }
 
       const port = this.runningPort!;
       const playlistStr = reverseProxyPlaylist(data, forUrl, port);
       const Buffer = require('buffer').Buffer;
-      const rewrittenText = Buffer.from(playlistStr, 'base64').toString('utf8');
-      const contentLength = CacheManager.byteLengthOfBase64(playlistStr);
+      // BUG-4 fix (r3-a2): store the RAW origin text on disk, not the
+      // rewritten form — `data` is the origin's own base64 body, decoded
+      // verbatim. Port-independent by design (matches
+      // `PrefetchWindow.registerPrefetchedPlaylist`'s already-established
+      // raw-text convention at this SAME final path); the rewrite for THIS
+      // response still happens above (`playlistStr`), and the rewrite for
+      // any future cached-fallback serve happens at serve time in
+      // `respondWithCachedPlaylistOrError`.
+      const originText = Buffer.from(data, 'base64').toString('utf8');
+      const contentLength = CacheManager.byteLengthOfBase64(data);
       const tempPath = tempCachePathFor(filePath);
 
       let finalPath: string | null;
       try {
-        await this._storage.write(tempPath, rewrittenText, 'utf8');
+        await this._storage.write(tempPath, originText, 'utf8');
         finalPath = await this._cacheFileRepo.verifyAndPromote(
           tempPath,
           contentLength,
@@ -934,7 +970,11 @@ export class CacheManager
         // register, fall through to the offline-fallback check (UC step
         // 4d/5): a previously cached playlist if one exists, else a mapped
         // error. Never a silent 200 with an unverified body.
-        return await this.respondWithCachedPlaylistOrError(key, reverseRes);
+        return await this.respondWithCachedPlaylistOrError(
+          key,
+          forUrl,
+          reverseRes
+        );
       }
 
       this.registerHlsOwner(key, finalPath, contentLength);
@@ -950,7 +990,7 @@ export class CacheManager
       // to a previously cached playlist when one exists, else a mapped error.
       if (reverseRes.closed !== true) {
         try {
-          await this.respondWithCachedPlaylistOrError(key, reverseRes);
+          await this.respondWithCachedPlaylistOrError(key, forUrl, reverseRes);
         } catch (_fallbackError) {
           // last-resort guard: the fallback itself failed before sending —
           // still never leave the request hanging.

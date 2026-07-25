@@ -187,6 +187,57 @@ describe('UC-IngestHlsPlaylist — Test Surface (TASK-007)', () => {
     statusEvents.stop();
   });
 
+  it('BUG-4 fix (r3-a2): a PREFETCH-ONLY asset (playlist file holds RAW origin text, never run through addPlaylistHandler — the exact shape PrefetchWindow.registerPrefetchedPlaylist leaves on disk) still gets a proxy-rewritten STALE-FALLBACK body, not raw origin text', async () => {
+    const manager = await newReadyManager('hls-ingest-bug4-prefetch-only');
+    const key = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+    const filePath = playlistFilePath(manager, PLAYLIST_URL);
+
+    // Simulate what a prefetch-only ingest leaves behind: the RAW,
+    // un-rewritten origin playlist text written straight to the FINAL path
+    // (no rewrite ever applied), and an `hls` owner entry registered for it
+    // — `addPlaylistHandler` is never called for this asset before the
+    // fallback below, matching a real player's very FIRST request for an
+    // asset that was only ever prefetched.
+    BlobUtilMock.__seedFile(filePath, SAMPLE_PLAYLIST);
+    (manager.memoryCache as any)?.put(key, {
+      kind: 'hls',
+      playlistPath: filePath,
+      segmentPaths: [],
+      bytes: SAMPLE_PLAYLIST.length,
+      generation: 0,
+      pinCount: 0,
+    });
+
+    // origin is down for this asset's first real playback request
+    BlobUtilMock.__setFetchError(new Error('origin unreachable'));
+    const res = mockResponse();
+    await (manager as any).addPlaylistHandler(PLAYLIST_URL, filePath, {}, res);
+
+    expect(res.calls).toHaveLength(1);
+    expect(res.calls[0]?.code).toBe(200);
+
+    const Buffer = require('buffer').Buffer;
+    const decodedFallbackBody = Buffer.from(
+      res.calls[0]?.body ?? '',
+      'base64'
+    ).toString('utf8');
+
+    // segment lines are proxy-rewritten (127.0.0.1:<current port>, carrying
+    // __hls_origin_url) — NOT the bare origin-relative `seg0.ts`/`seg1.ts`
+    // lines SAMPLE_PLAYLIST itself contains.
+    expect(decodedFallbackBody).toContain(`127.0.0.1:${PORT}`);
+    expect(decodedFallbackBody).toContain('__hls_origin_url');
+    const segmentLines = decodedFallbackBody
+      .split('\n')
+      .filter((line: string) => line.length > 0 && !line.startsWith('#'));
+    expect(segmentLines.length).toBeGreaterThan(0);
+    for (const line of segmentLines) {
+      expect(line.startsWith(`http://127.0.0.1:${PORT}`)).toBe(true);
+      expect(line).not.toBe('seg0.ts');
+      expect(line).not.toBe('seg1.ts');
+    }
+  });
+
   it('TS-INV-04: every internal branch (success, origin failure w/ and w/o cache) always sends exactly one response', async () => {
     const manager = await newReadyManager('hls-ingest-inv04');
 
