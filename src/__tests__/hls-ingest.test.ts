@@ -10,14 +10,18 @@
  * this is what the UCs' own Test Surface calls "force every internal
  * branch via mocks".
  *
- * KNOWN GAP (r1-a1 WorkResult escalates): TASK-006 (verified writeTemp/
- * verifyAndPromote, pin-generation-guard scope substrate) is not available
- * to this scope. Both handlers write directly to the FINAL path (same
- * primitive `FileSystemManager.write` already used elsewhere in this file),
- * not the temp→verify→promote pattern the contract specifies. Tests below
- * assert the OBSERVABLE behavior this scope actually delivers (always-
- * respond, v2 registration, offline fallback, owner bytes accounting), not
- * literal temp-path/generation-check mechanics that don't exist yet.
+ * UNBLOCKED (round-ledger D4, r1-a2): TASK-006 (verified writeTemp/
+ * verifyAndPromote, pin-generation-guard scope substrate) has landed. Both
+ * handlers now write to a TEMP path first (`tempCachePathFor`) and promote
+ * atomically via `CacheFileRepository.verifyAndPromote` — segments use
+ * `writeTemp`'s native direct-to-disk download literally (no transform
+ * needed); the playlist body still fetches in-memory (its URL-rewrite
+ * transform has no writeTemp hook) but is temp-written + verified +
+ * promoted the same way. Segment fetch mocks below carry an explicit
+ * `Content-Length` header matching the fetched payload's own length so
+ * verifyAndPromote's size check (`stat(tempPath).size === contentLength`)
+ * passes under this repo's jest mock (whose `stat().size` is the raw
+ * stored-string length, not a base64-decoded byte count).
  */
 import { CacheManager, CACHE_STATUS_EVENT } from '../ProxyCacheManager';
 import { FreePolicy } from '../Provider/MemoryCacheFreePolicy';
@@ -351,7 +355,13 @@ describe('UC-IngestHlsSegment — Test Surface (TASK-008)', () => {
     const payloads = ['seg-zero-bytes', 'seg-one-bytes-x', 'seg-two-bytes-xy'];
 
     for (let i = 0; i < segments.length; i++) {
-      BlobUtilMock.__setFetchResponse({ data: b64(payloads[i]!), headers: {} });
+      // TASK-008: writeTemp/verifyAndPromote verify the temp file's size
+      // against the origin's declared Content-Length before promoting —
+      // must match what actually lands on disk (the raw fetched string).
+      BlobUtilMock.__setFetchResponse({
+        data: b64(payloads[i]!),
+        headers: { 'Content-Length': String(b64(payloads[i]!).length) },
+      });
       const res = mockResponse();
       await (manager as any).addSegmentHandler(
         segments[i],
@@ -395,7 +405,10 @@ describe('UC-IngestHlsSegment — Test Surface (TASK-008)', () => {
     expect(manager.memoryCache?.has(ownerKey)).toBe(true);
 
     // success
-    BlobUtilMock.__setFetchResponse({ data: b64('bytes'), headers: {} });
+    BlobUtilMock.__setFetchResponse({
+      data: b64('bytes'),
+      headers: { 'Content-Length': String(b64('bytes').length) },
+    });
     const successRes = mockResponse();
     await (manager as any).addSegmentHandler(
       SEGMENT_URL,
@@ -436,7 +449,7 @@ describe('UC-IngestHlsSegment — Test Surface (TASK-008)', () => {
     const ownerKey = await ingestPlaylist(manager);
     BlobUtilMock.__setFetchResponse({
       data: b64('segment-bytes'),
-      headers: {},
+      headers: { 'Content-Length': String(b64('segment-bytes').length) },
     });
     const res = mockResponse();
 

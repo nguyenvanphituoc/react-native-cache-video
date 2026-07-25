@@ -9,6 +9,10 @@ import {
   mergeLargerNumber,
   mergeWithCustomCondition,
 } from '../Utils/util';
+// TASK-009 (round-ledger D4): isEvictable/bumpGeneration (TASK-005,
+// pin-generation-guard scope substrate) are now import-ready — the eviction
+// seam below is no longer BLOCKED.
+import { bumpGeneration, isEvictable } from '../Libs/pinGenerationGuard';
 
 /**
  *
@@ -79,6 +83,11 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
 
       // Keep evicting least frequently used items until we're under capacity
       let count = 0;
+      // TASK-005: candidates skipped for being pinned/downloading
+      // (EVICTION_SKIPPED_PINNED) are excluded from every later
+      // findLFUKey call too — the policy must not re-select the same
+      // pinned candidate forever.
+      const skippedPinned = new Set<string>();
       while (totalSize > this.capacityBytes) {
         count++;
 
@@ -88,7 +97,11 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
           break;
         }
 
-        const evictedKey = this.findLFUKey(cache, triggerKey);
+        const excluded = new Set<string>(skippedPinned);
+        if (triggerKey) {
+          excluded.add(triggerKey);
+        }
+        const evictedKey = this.findLFUKey(cache, excluded);
         if (!evictedKey) {
           // Nothing left to evict or only the trigger entry remains
           break;
@@ -102,13 +115,19 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
           continue;
         }
 
-        // BLOCKED (cross-scope dependency, r1-a1 WorkResult escalates):
-        // isEvictable(evictedKey) (TASK-005, pin-generation-guard scope
-        // substrate) should gate this eviction — a pinned/downloading
-        // candidate must be skipped and the next one tried instead.
-        // bumpGeneration(evictedKey) (TASK-005) should run here, before the
-        // unlink that delegate.didEvictHandler triggers. Neither primitive
-        // is available in this scope's substrate yet.
+        // TASK-005 (UC-EvictCacheAsset step 2, EVICTION_SKIPPED_PINNED): a
+        // pinned/downloading candidate is skipped — not an exception, a
+        // normal control-flow branch. The policy tries the next candidate.
+        if (!isEvictable(evictedKey)) {
+          skippedPinned.add(evictedKey);
+          continue;
+        }
+
+        // TASK-005 (UC-EvictCacheAsset step 5): generation bumped BEFORE
+        // the unlink that delegate.didEvictHandler triggers — closes the
+        // eviction half of the no-resurrection guard (R4).
+        bumpGeneration(evictedKey);
+
         cache.delete(evictedKey);
         delete this.referenceBit[evictedKey];
         await delegate?.didEvictHandler(evictedKey, entry);
@@ -123,14 +142,22 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
 
   private findLFUKey(
     cache: Map<string, any>,
-    excludeKey?: string
+    excludeKey?: string | Set<string>
   ): string | null {
+    const excluded =
+      excludeKey instanceof Set
+        ? excludeKey
+        : excludeKey
+        ? new Set([excludeKey])
+        : undefined;
+
     let minFreq = Number.MAX_VALUE;
     let lfuKey: string | null = null;
 
     for (const key in this.referenceBit) {
-      // Skip the entry that triggered eviction
-      if (key === excludeKey) continue;
+      // Skip the entry that triggered eviction (or was already skipped for
+      // being pinned)
+      if (excluded?.has(key)) continue;
 
       const freq = this.referenceBit[key];
       if (freq && freq < minFreq) {
@@ -149,7 +176,7 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
     // deleted disk-mtime lookup (no disk rescan, TASK-009).
     if (!lfuKey && Object.keys(this.referenceBit).length > 0) {
       const eligibleKeys = Array.from(cache.keys()).filter(
-        (key) => key !== excludeKey
+        (key) => !excluded?.has(key)
       );
       lfuKey = eligibleKeys[0] ?? null;
     }

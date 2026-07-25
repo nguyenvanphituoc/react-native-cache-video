@@ -4,12 +4,10 @@
  * one-time orphan sweep, registry-native byte accounting (no disk rescan),
  * kind-branching didEvictHandler.
  *
- * KNOWN GAP (r1-a1 WorkResult escalates): TASK-005 (pin refcount +
- * generation guard, pin-generation-guard scope substrate —
- * src/Libs/pinGenerationGuard.*) is not available to this scope.
- * `isEvictable`/`bumpGeneration` cannot be exercised — UC-EvictCacheAsset's
- * TS-INV-02 and TS-ERR-EVICTION_SKIPPED_PINNED (pin survives eviction
- * pressure) are `.skip`-marked below with the same note, not faked.
+ * UNBLOCKED (round-ledger D4, r1-a2): TASK-005 (pin refcount + generation
+ * guard, pin-generation-guard scope substrate — src/Libs/pinGenerationGuard.*)
+ * has landed. UC-EvictCacheAsset's TS-INV-02 and TS-ERR-EVICTION_SKIPPED_PINNED
+ * (pin survives eviction pressure) are exercised below via retain()/release().
  */
 import { CacheManager, REGISTRY_UPGRADED_EVENT } from '../ProxyCacheManager';
 import { LFUSizePolicy } from '../Provider/MemoryCacheLFUSizePolicy';
@@ -18,6 +16,11 @@ import { KEY_PREFIX } from '../Utils/constants';
 import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
 import { recordEvents, resetTestHarness } from '../__mock__/harness';
 import BlobUtilMock from '../__mock__/react-native-blob-util';
+import {
+  retain,
+  release,
+  __resetPinGenerationGuardForTests,
+} from '../Libs/pinGenerationGuard';
 
 const MEDIA_URL = 'https://cdn.example.com/videos/movie.mp4';
 
@@ -136,6 +139,7 @@ describe('AssetRegistryRepository — load()/save() version gate (TASK-004)', ()
 describe('UC-EvictCacheAsset — Test Surface (TASK-009)', () => {
   beforeEach(() => {
     resetTestHarness();
+    __resetPinGenerationGuardForTests();
   });
 
   it('TS-INV-01: an HLS asset with a playlist + 3 segments evicts as ONE unit — all 4 files removed together, registry entry gone', async () => {
@@ -281,15 +285,99 @@ describe('UC-EvictCacheAsset — Test Surface (TASK-009)', () => {
     expect((policy as any).findLFUKey.length).toBe(2);
   });
 
-  it.skip('TS-INV-02: a pinned asset survives eviction pressure — BLOCKED, isEvictable/retain (TASK-005, pin-generation-guard scope) not available in this substrate', () => {
-    // See r1-a1 WorkResult escalates: this scope's substrate
-    // (ProxyCacheManager.ts/MemoryCacheLFUSizePolicy.ts/MemoryCacheProvider.ts/
-    // fileSystem.ts) has no home for retain()/release()/isEvictable() — those
-    // are TASK-005's primitives, assigned to the pin-generation-guard scope.
+  it('TS-INV-02: a pinned asset survives eviction pressure — a different, unpinned asset is evicted instead', async () => {
+    const policy = new LFUSizePolicy(0); // 0 MB capacity — always over budget
+    const cache = new Map<string, any>();
+    cache.set('key-a', {
+      kind: 'media',
+      path: '/a',
+      bytes: 10,
+      generation: 0,
+      pinCount: 0,
+    });
+    cache.set('key-b', {
+      kind: 'media',
+      path: '/b',
+      bytes: 20,
+      generation: 0,
+      pinCount: 0,
+    });
+    cache.set('key-c', {
+      kind: 'media',
+      path: '/c',
+      bytes: 30,
+      generation: 0,
+      pinCount: 0,
+    });
+    // snapshot the keys first — onAccess mutates `cache` (delete+re-set the
+    // touched key to move it to the end)
+    Array.from(cache.keys()).forEach((k) => policy.onAccess(cache, k));
+
+    // pin the candidate findLFUKey would otherwise pick first (equal
+    // frequency tie-break resolves to the first-inserted key — see the
+    // sibling TS-INV-03/findLFUKey tests above for the same convention)
+    retain('key-a');
+
+    const evicted: string[] = [];
+    const delegate = {
+      didEvictHandler: jest.fn(async (key: string) => {
+        evicted.push(key);
+      }),
+    };
+
+    await policy.onEvict(cache, delegate as any, undefined);
+
+    expect(evicted).not.toContain('key-a');
+    expect(cache.has('key-a')).toBe(true); // pinned asset survives
+    expect(evicted.length).toBeGreaterThan(0); // a different candidate WAS evicted
+
+    release('key-a');
   });
 
-  it.skip('TS-ERR-EVICTION_SKIPPED_PINNED: policy proceeds to the next candidate without throwing — BLOCKED, same TASK-005 dependency as above', () => {
-    // See r1-a1 WorkResult escalates.
+  it('TS-ERR-EVICTION_SKIPPED_PINNED: policy proceeds to the next candidate without throwing', async () => {
+    const policy = new LFUSizePolicy(0);
+    const cache = new Map<string, any>();
+    cache.set('key-a', {
+      kind: 'media',
+      path: '/a',
+      bytes: 10,
+      generation: 0,
+      pinCount: 0,
+    });
+    cache.set('key-b', {
+      kind: 'media',
+      path: '/b',
+      bytes: 20,
+      generation: 0,
+      pinCount: 0,
+    });
+    cache.set('key-c', {
+      kind: 'media',
+      path: '/c',
+      bytes: 30,
+      generation: 0,
+      pinCount: 0,
+    });
+    Array.from(cache.keys()).forEach((k) => policy.onAccess(cache, k));
+    retain('key-a');
+
+    const delegate = {
+      didEvictHandler: jest.fn(async () => {}),
+    };
+
+    await expect(
+      policy.onEvict(cache, delegate as any, undefined)
+    ).resolves.not.toThrow();
+
+    // the skip is a normal control-flow branch, not an exception — a
+    // different candidate was still evicted, the loop never got stuck
+    expect(delegate.didEvictHandler).toHaveBeenCalled();
+    expect(delegate.didEvictHandler).not.toHaveBeenCalledWith(
+      'key-a',
+      expect.anything()
+    );
+
+    release('key-a');
   });
 
   it('TS-NOGO-01: didEvictHandler has no code path that removes fewer than the full file set for an hls asset', async () => {
