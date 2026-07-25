@@ -54,7 +54,7 @@ import { LFUSizePolicy } from '../Provider/MemoryCacheLFUSizePolicy';
 import { tempCachePathFor } from '../Libs/fileSystem';
 import { KEY_PREFIX } from '../Utils/constants';
 import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
-import { reverseProxyURL } from '../Utils/util';
+import { getOriginURL, reverseProxyURL } from '../Utils/util';
 import { recordEvents, resetTestHarness } from '../__mock__/harness';
 import BlobUtilMock from '../__mock__/react-native-blob-util';
 import NativeProxyMock from '../__mock__/native-cache-video-http-proxy';
@@ -776,10 +776,11 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
     expect(BlobUtilMock.__hasFile(seg0Path)).toBe(false); // NOT leaked — R2/R3 holds
   }, 15000);
 
-  it('R9 FIXED — CONFIRMED: an origin-down FIRST playlist request for a prefetch-ONLY asset now gets the 200 STALE-FALLBACK an already-played asset gets (BUG-3 fix); one residual gap surfaces and is asserted directly, not hidden — the served body is the RAW, un-rewritten origin playlist text, not proxy-rewritten', async () => {
+  it('R9 FIXED — CONFIRMED: an origin-down FIRST playlist request for a prefetch-ONLY asset now gets the 200 STALE-FALLBACK an already-played asset gets (BUG-3 fix); BUG-4 fix CONFIRMED — the served body is proxy-rewritten with the CURRENT running port at serve time, not raw origin text', async () => {
+    const PORT = 52108;
     const manager = new CacheManager('lifecycle-prefetch-r9-blind', true);
     manager.enableMemoryCache(new FreePolicy());
-    await manager.enableBridgeServer(52108);
+    await manager.enableBridgeServer(PORT);
 
     const PLAYLIST_URL =
       'https://cdn.example.com/videos/lifecycle-prefetch-r9/index.m3u8';
@@ -831,25 +832,44 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
     expect(res.calls[0]?.method).toBe('send');
     expect(res.calls[0]?.code).toBe(200);
 
-    // Residual gap — NOT hidden, asserted directly (see the WorkResult
-    // discoveries[] entry too): the served fallback body for a
-    // PREFETCH-ONLY asset is registerPrefetchedPlaylist's RAW origin
-    // playlist text, written straight to disk with NO reverseProxyPlaylist
-    // rewrite ever applied — unlike a real ingest via addPlaylistHandler,
-    // which rewrites every segment URI to point at the local proxy (via
-    // `LOCALHOST` = 'http://127.0.0.1', Utils/constants.ts) BEFORE ever
-    // writing to disk (see Stage 5's cachedBody, which IS the rewritten
-    // form). A player resolving THIS body's segment reference would resolve
-    // it against whatever base URL it fetched the playlist from, not
-    // necessarily land back on this proxy's own segment route.
+    // BUG-4 FIXED — CONFIRMED (r3-a2): the file on disk for a prefetch-only
+    // asset holds the RAW origin text (registerPrefetchedPlaylist's
+    // already-established convention), but `respondWithCachedPlaylistOrError`
+    // now rewrites it with `reverseProxyPlaylist` at SERVE time, using the
+    // CURRENT running port — the exact same transform a fresh ingest via
+    // `addPlaylistHandler` applies (see Stage 5's cachedBody). The served
+    // body must therefore be indistinguishable from a fresh rewrite: every
+    // segment line points at this proxy (`127.0.0.1:<PORT>`) carrying
+    // `__hls_origin_url`, never a bare origin-relative segment name.
     const Buffer = require('buffer').Buffer;
     const decodedFallbackBody = Buffer.from(
       res.calls[0]?.body ?? '',
       'base64'
     ).toString('utf8');
     const rawOriginText = playlist(['seg0.ts']);
-    expect(decodedFallbackBody).toBe(rawOriginText); // RAW, un-rewritten origin text
-    expect(decodedFallbackBody).not.toContain('127.0.0.1'); // proxy rewrite never ran
+    expect(decodedFallbackBody).not.toBe(rawOriginText); // no longer raw, un-rewritten origin text
+    expect(decodedFallbackBody).toContain(`127.0.0.1:${PORT}`);
+    expect(decodedFallbackBody).toContain('__hls_origin_url');
+
+    const segmentLines = decodedFallbackBody
+      .split('\n')
+      .filter((line: string) => line.length > 0 && !line.startsWith('#'));
+    expect(segmentLines.length).toBeGreaterThan(0);
+    for (const line of segmentLines) {
+      // proxy-rewritten, not the bare origin-relative `seg0.ts` line
+      // `playlist(['seg0.ts'])` itself contains.
+      expect(line).not.toBe('seg0.ts');
+      expect(line.startsWith(`http://127.0.0.1:${PORT}`)).toBe(true);
+
+      // strong round-trip: decoding the rewritten URI through the SAME
+      // `getOriginURL` the real proxy dispatch path uses (ProxyCacheManager
+      // addRequestHandlers, Utils/util.ts) must recover the ORIGINAL origin
+      // segment URL exactly — proving this is a real, resolvable proxy
+      // rewrite, not just a string that happens to contain "127.0.0.1".
+      const parsed = new URL(line);
+      const reqPath = `${parsed.pathname}${parsed.search}`;
+      expect(getOriginURL(reqPath, PORT)).toBe(SEG0);
+    }
   }, 15000);
 });
 
