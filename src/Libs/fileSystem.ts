@@ -163,6 +163,38 @@ export class FileSystemManager {
     return [] as Awaited<ReturnType<typeof FSManager.lstat>>;
   }
 
+  // TASK-004 (AssetRegistryRepository#sweepOrphans): one-time, PREFIX-SCOPED
+  // sweep of everything under `cachePrefix` — RH5 explicitly rules out a
+  // full-disk scan, so this only ever lists the single cache bucket folder
+  // (never recurses above it). Called exactly once, right after a v1
+  // (untagged) registry is discarded, when the fresh v2 registry is still
+  // empty — so every file found here has no v2 entry to answer for by
+  // construction; a per-file unlink failure (already gone) is swallowed, not
+  // an error (contract: "ignored, continues sweeping remaining candidates").
+  async sweepOrphans(
+    cachePrefix: string
+  ): Promise<{ swept: string[]; bytesReclaimed: number }> {
+    const files = await this.getStatisticList(cachePrefix);
+    const swept: string[] = [];
+    let bytesReclaimed = 0;
+
+    for (const file of files) {
+      if (file.type !== 'file') {
+        continue;
+      }
+      const size = parseInt(file.size as unknown as string, 10) || 0;
+      try {
+        await this.unlinkFile(file.path);
+        swept.push(file.path);
+        bytesReclaimed += size;
+      } catch (error) {
+        // already gone — not an error, keep sweeping the rest
+      }
+    }
+
+    return { swept, bytesReclaimed };
+  }
+
   async existsFile(forFile: string): Promise<boolean> {
     // let key = cacheKey(forKey, folder);
     // check exist and ignore timestamp path

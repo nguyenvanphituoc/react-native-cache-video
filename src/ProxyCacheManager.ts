@@ -8,6 +8,7 @@ import type {
   ResponseInterface,
   PreCacheInterface,
   MemoryCachePolicyInterface,
+  CacheEntry,
 } from './types/type';
 import {
   FALLBACK_WARNINGS,
@@ -117,6 +118,31 @@ import { MemoryCacheProvider } from './Provider/MemoryCacheProvider';
 import { BridgeServer } from './Libs/httpProxy';
 import { PreCacheProvider } from './Provider/PreCacheProvider';
 
+// - MARK: Asset registry v2 (TASK-004, UC-IngestHlsPlaylist/UC-EvictCacheAsset)
+// `version: 2` is the first version-tagged persisted-registry format — any
+// prior (untagged, today's real on-disk shape) document is discarded
+// wholesale, never migrated (R6/RH5). Written at the single point the final
+// on-disk document is assembled (saveCacheToStorage) rather than duplicated
+// inside MemoryCacheProvider.export(), so there is exactly one source of
+// truth for what "the persisted document" contains.
+export const REGISTRY_VERSION = 2;
+
+// RNCV_* DeviceEventEmitter convention (matches CACHE_ENTRY_DISCARDED_EVENT /
+// HLS_CACHING_RESTART / SERVER_START_FAILED_EVENT in Utils/constants.ts).
+// Defined locally: Utils/constants.ts is outside this scope's substrate —
+// see the r1-a1 WorkResult deviations for the note to fold these into that
+// file's shared catalogue once the substrate allows it.
+export const REGISTRY_UPGRADED_EVENT = 'RNCV_REGISTRY_UPGRADED';
+// Diagnostic, non-authoritative signal for UC-IngestHlsPlaylist's HIT/MISS/
+// STALE-FALLBACK outcome (proxy-request-gateway.contract's `X-Cache` field).
+// ResponseInterface.send(code, type, body) (src/types/type.d.ts) and the
+// native respond bridge (src/Libs/httpProxy.ts) carry no headers dict, and
+// extending them is outside this scope's substrate — this event is the
+// test/diagnostics-only substitute (contract explicitly scopes X-Cache as
+// "test/diagnostics only", never player-consumed).
+export const CACHE_STATUS_EVENT = 'RNCV_CACHE_STATUS';
+export type CacheStatus = 'HIT' | 'MISS' | 'STALE-FALLBACK';
+
 export class CacheManager
   implements PreCacheDelegate, MemoryCacheDelegate<any>
 {
@@ -136,7 +162,17 @@ export class CacheManager
   // !isForeground branch) — lets reverseProxyURL name APP_BACKGROUNDED
   // instead of the generic not-started cause (UC-ResolvePlaybackUrl step 3).
   private _stoppedByBackground = false;
-  private _memoryCache?: MemoryCacheInterface<string>;
+  // TASK-004: generic swap — the registry now holds the full CacheEntry
+  // (media path OR hls playlist+segments+bytes), not a bare path string.
+  private _memoryCache?: MemoryCacheInterface<CacheEntry>;
+  // TASK-008: which HLS asset owns the NEXT segment request. This library
+  // proxies one active track at a time (see FileSystemManager's own "support
+  // only one track" note) — segment requests always follow the playlist
+  // request for the stream currently playing, so "most recently requested
+  // playlist" is the owner a bare segment URL (no owner hint in the request
+  // itself — see proxy-request-gateway.contract's handleSegmentRequest
+  // Request table) resolves against.
+  private _lastHlsOwnerKey?: string;
 
   // N8 provider-missing guard (issue #8, round-ledger D5): true ONLY on the
   // module-default context instance in useProxyCacheProvider — a non-breaking
@@ -212,17 +248,44 @@ export class CacheManager
   // (the disk path) both now derive from CacheKeyPolicy — a CDN re-sign of
   // `forKey` folds to the SAME `key`, fixing the old `originURL.href` (full
   // signed URL) identity bug.
+  // TASK-004: builds/refreshes a `media`-kind CacheEntry for `forKey` — bytes
+  // for a media asset are not verified-write-accounted yet (that gap closes
+  // with TASK-006, out of this scope's substrate); existing bytes/generation/
+  // pinCount are preserved across a re-put of the same key.
+  private toMediaEntry(path: string, existing?: CacheEntry): CacheEntry {
+    return {
+      kind: 'media',
+      path,
+      bytes: existing?.bytes ?? 0,
+      generation: existing?.generation ?? 0,
+      pinCount: existing?.pinCount ?? 0,
+    };
+  }
+
+  // Public accessor contract is unchanged (string | undefined — every
+  // existing caller, including useAsyncCache, expects a playable local
+  // path): the registry's internal value is now the full CacheEntry, this
+  // projects the primary on-disk path back out of it.
+  private static entryPath(entry: CacheEntry): string {
+    return entry.kind === 'hls' ? entry.playlistPath : entry.path;
+  }
+
   private putCachedFile(forKey: string, folder: string) {
     //
     const key = CacheKeyPolicy.keyFor(forKey);
     const cacheKeyStr = CacheKeyPolicy.filePathFor(forKey, folder, KEY_PREFIX);
+    const existing = this._memoryCache?.get(key);
 
-    this._memoryCache?.put(key, cacheKeyStr);
+    this._memoryCache?.put(key, this.toMediaEntry(cacheKeyStr, existing));
   }
 
-  getCachedFile(forKey: string, _folder: string = this.cacheFolder) {
+  getCachedFile(
+    forKey: string,
+    _folder: string = this.cacheFolder
+  ): string | undefined {
     const key = CacheKeyPolicy.keyFor(forKey);
-    return this._memoryCache?.get(key);
+    const entry = this._memoryCache?.get(key);
+    return entry ? CacheManager.entryPath(entry) : undefined;
   }
 
   // Serve-guard (issue #5 read side): only VERIFIED entries are ever served.
@@ -260,7 +323,7 @@ export class CacheManager
     // re-registered; a temp-convention path is never served.
     if (!isTempCachePath(cacheKeyStr)) {
       if (await this._storage.existsFile(cacheKeyStr)) {
-        this._memoryCache?.syncCache(key, cacheKeyStr);
+        this._memoryCache?.syncCache(key, this.toMediaEntry(cacheKeyStr));
         this.getCachedFile(url);
         return cacheKeyStr;
       }
@@ -285,7 +348,8 @@ export class CacheManager
   // - MARK: MemoryCache section
   enableMemoryCache(cachePolicy: MemoryCachePolicyInterface) {
     if (!this._memoryCache) {
-      this._memoryCache = new MemoryCacheProvider<string>(cachePolicy);
+      // TASK-004: generic swap — CacheEntry in place of a bare path string.
+      this._memoryCache = new MemoryCacheProvider<CacheEntry>(cachePolicy);
       this._memoryCache.delegate = this;
       this.loadCacheFromStorage();
     }
@@ -326,15 +390,20 @@ export class CacheManager
 
     // First get the cached file path
     const cachedPath = await this.getCachedFileAsync(url);
+    // TASK-009 retargeted didEvictHandler from a bare filePath string to the
+    // full CacheEntry (kind-branching) — captured BEFORE syncCache removes
+    // it below. (Generation-bump on explicit removal is TASK-010, out of
+    // this scope's substrate — this call site only stays type/behavior
+    // consistent with the new didEvictHandler signature.)
+    const entry = this._memoryCache.get(key);
 
     // Clean up memory cache/policy regardless of file existence
     this._memoryCache.syncCache(key);
 
-    // If we had a cached path, try to delete the file. didEvictHandler needs
-    // the ORIGINAL url (not the hashed key) to tell HLS vs. media apart.
-    if (cachedPath) {
+    // If we had a cached path, try to delete the file(s).
+    if (cachedPath && entry) {
       try {
-        await this.didEvictHandler(url, cachedPath);
+        await this.didEvictHandler(key, entry);
       } catch (error) {
         // Still succeeded in cleaning cache/policy even if file deletion failed
       }
@@ -345,34 +414,99 @@ export class CacheManager
     this._memoryCache?.delegate && (this._memoryCache.delegate = delegate);
   }
 
-  async didEvictHandler(key: string, filePath?: string) {
-    if (isHLSUrl(key)) {
-      // TODO:
-      // console.warn('didEvictHandler: HLS url not support yet.');
-    } else if (key && filePath) {
-      await this._storage.unlinkFile(filePath);
+  // TASK-009 (UC-EvictCacheAsset step 4): branches on `entry.kind`, not the
+  // old `isHLSUrl(key)` string sniff — `key` here is a normalized
+  // CacheKeyPolicy hash, not a URL, so the old check silently never matched.
+  // `media`: unlink the one file (today's shape, retargeted from a bare
+  // `filePath` string to `entry.path`). `hls`: unlink the playlist AND every
+  // segment together — the whole asset leaves in one eviction pass, never
+  // partially (INV-01).
+  //
+  // BLOCKED (cross-scope dependency, r1-a1 WorkResult escalates):
+  // isEvictable(key)/bumpGeneration(key) (TASK-005, pin-generation-guard
+  // scope substrate — src/Libs/pinGenerationGuard.*) are not available in
+  // this scope's substrate. This handler unlinks whatever the policy already
+  // selected; the pinned/downloading skip-guard and the pre-unlink
+  // generation bump both still need to be wired in once TASK-005 lands.
+  async didEvictHandler(key: string, entry?: CacheEntry) {
+    if (!key || !entry) {
+      return;
+    }
+
+    if (entry.kind === 'hls') {
+      await Promise.all([
+        this._storage.unlinkFile(entry.playlistPath),
+        ...entry.segmentPaths.map((segmentPath) =>
+          this._storage.unlinkFile(segmentPath)
+        ),
+      ]);
+    } else {
+      await this._storage.unlinkFile(entry.path);
     }
   }
 
-  private async loadCacheFromStorage() {
+  // TASK-004 (AssetRegistryRepository#load): version-gated read — an
+  // absent file, a parse error, AND a present-but-wrong/missing `version`
+  // field all resolve to an empty registry, NEVER a throw (contract Error
+  // Cases table). Only the last of those three (a real, parsed document
+  // whose version isn't the current one — including today's v1 shape, which
+  // has no `version` field at all) is a genuine "upgrade": it fires
+  // RegistryUpgraded and sweeps the now-orphaned files under the cache
+  // bucket root once. A missing file or corrupt JSON is just a cold start —
+  // nothing was ever validly persisted, so there is nothing to sweep.
+  private async loadCacheFromStorage(): Promise<{
+    version: number;
+    entries: Map<string, CacheEntry>;
+  }> {
+    const jsonStr = await this._storage.read(
+      this.localFileUrl,
+      this.fileEncodingFormat
+    );
+
+    if (!jsonStr) {
+      // file missing (first run) — never throws
+      return { version: 0, entries: new Map() };
+    }
+
+    let parsed: any;
     try {
-      const jsonStr = await this._storage.read(
-        this.localFileUrl,
-        this.fileEncodingFormat
-      );
-
-      this._memoryCache && this._memoryCache?.load(jsonStr);
+      parsed = JSON.parse(jsonStr);
     } catch (error) {
-      throw error;
+      // corrupt/unparsable JSON — never throws, never repaired-in-place
+      return { version: 0, entries: new Map() };
     }
+
+    if (!parsed || parsed.version !== REGISTRY_VERSION) {
+      // v1 (untagged) or any other non-current version — discard wholesale,
+      // one-time prefix-scoped orphan sweep (RH5: not a full-disk scan).
+      const swept = await this._storage.sweepOrphans(this.cacheFolder);
+      DeviceEventEmitter.emit(REGISTRY_UPGRADED_EVENT, {
+        sweptCount: swept.swept.length,
+        bytesReclaimed: swept.bytesReclaimed,
+      });
+      return { version: 0, entries: new Map() };
+    }
+
+    // version === 2 — hydrate the in-memory registry normally.
+    this._memoryCache?.load(jsonStr);
+    const entries = new Map<string, CacheEntry>(
+      (this._memoryCache?.export().lruCachedLocalFiles ?? []) as Array<
+        [string, CacheEntry]
+      >
+    );
+    return { version: REGISTRY_VERSION, entries };
   }
 
+  // TASK-004 (AssetRegistryRepository#save): the on-disk document always
+  // carries `version: 2` — today's `Object.assign(memoryCache, {})` wrote no
+  // version tag at all (the confirmed gap this closes).
   private saveCacheToStorage() {
     if (this._memoryCache) {
       //
       const memoryCache = this._memoryCache.export();
-      // const jsonObj = Object.assign(memoryCache, { cachedLocalFiles: this.cachedLocalFiles });
-      const jsonObj = Object.assign(memoryCache, {});
+      const jsonObj = Object.assign(memoryCache, {
+        version: REGISTRY_VERSION,
+      });
       const jsonStr = JSON.stringify(jsonObj);
 
       return this._storage.write(
@@ -406,7 +540,7 @@ export class CacheManager
       // this fetch from exist check
       // silently save to cache
       // because it pre-cache
-      this._memoryCache?.syncCache(key, cacheKeyStr);
+      this._memoryCache?.syncCache(key, this.toMediaEntry(cacheKeyStr));
     } else {
       // this download and need manually save
       // new file downloaded
@@ -563,14 +697,15 @@ export class CacheManager
         async (req: RequestInterface, res: ResponseInterface) => {
           const urlStr = getOriginURL(req.url, this.runningPort!);
 
-          let filePath = CacheKeyPolicy.filePathFor(
-            urlStr ?? '',
-            this.cacheFolder,
-            KEY_PREFIX
-          );
           if (!urlStr) {
             return res.send(400, 'text/plain', 'Bad Request');
           }
+
+          const filePath = CacheKeyPolicy.filePathFor(
+            urlStr,
+            this.cacheFolder,
+            KEY_PREFIX
+          );
           //
           const defaultHeaders = Object.assign({}, req?.headers ?? {});
           // eslint-disable-next-line dot-notation
@@ -593,49 +728,153 @@ export class CacheManager
       );
   }
 
+  // TASK-007 helpers (UC-IngestHlsPlaylist)
+  private emitCacheStatus(key: string, status: CacheStatus) {
+    DeviceEventEmitter.emit(CACHE_STATUS_EVENT, { key, status });
+  }
+
+  private static byteLengthOfBase64(base64Str: string): number {
+    // matches util.ts#reverseProxyPlaylist's own inline `require('buffer')`
+    // convention (avoids a top-level Buffer polyfill-timing dependency).
+    const Buffer = require('buffer').Buffer;
+    return Buffer.byteLength(base64Str, 'base64');
+  }
+
+  // Creates (or refreshes) the `hls` owner entry `addSegmentHandler` appends
+  // to. `segmentPaths` starts empty and is left untouched on a re-ingest
+  // (live playlists are polled repeatedly — re-adding the playlist's own
+  // byte count on every poll would inflate `bytes` without bound), only
+  // `playlistPath` is refreshed.
+  private registerHlsOwner(
+    key: string,
+    playlistPath: string,
+    playlistBytes: number
+  ): void {
+    const existing = this._memoryCache?.get(key);
+    if (existing && existing.kind === 'hls') {
+      this._memoryCache?.put(key, { ...existing, playlistPath });
+      return;
+    }
+
+    const entry: CacheEntry = {
+      kind: 'hls',
+      playlistPath,
+      segmentPaths: [],
+      bytes: playlistBytes,
+      generation: 0,
+      pinCount: 0,
+    };
+    this._memoryCache?.put(key, entry);
+  }
+
+  // R9 offline fallback: serves the last verified playlist body for `key`
+  // when the origin is unreachable; otherwise 502 ORIGIN_UNREACHABLE_NO_CACHE.
+  // Always terminates the request (R10) — this is itself one of the
+  // always-respond branches, never throws past this point.
+  private async respondWithCachedPlaylistOrError(
+    key: string,
+    reverseRes: ResponseInterface
+  ): Promise<void> {
+    const entry = this._memoryCache?.get(key);
+
+    if (entry && entry.kind === 'hls' && entry.playlistPath) {
+      const exists = await this._storage.existsFile(entry.playlistPath);
+      if (exists) {
+        const cachedBody = await this._storage.read(
+          entry.playlistPath,
+          'base64'
+        );
+        this.emitCacheStatus(key, 'STALE-FALLBACK');
+        reverseRes.send(200, HLS_CONTENT_TYPE, cachedBody);
+        return;
+      }
+    }
+
+    this.emitCacheStatus(key, 'MISS');
+    reverseRes.send(502, 'text/plain', 'ORIGIN_UNREACHABLE_NO_CACHE');
+  }
+
+  // TASK-007 (UC-IngestHlsPlaylist): fetch → verify-ish write → v2
+  // registration → respond, OR offline fallback, OR a mapped error — every
+  // path ends in reverseRes.send/json/html (R10; closes the confirmed bare
+  // `throw error` gap with no response ever sent).
+  //
+  // BLOCKED (cross-scope dependency, r1-a1 WorkResult escalates): the
+  // playlist body is written directly to its FINAL path via
+  // `this._storage.write` below, NOT via TASK-006's `writeTemp`/
+  // `verifyAndPromote` (CacheFileRepository, `src/Libs/verifiedWrite.*` —
+  // pin-generation-guard scope's substrate, unavailable here). This closes
+  // the "playlist never written to disk at all" gap (today's code only
+  // registered a path, it never wrote one) but is not yet the TEMP-then-
+  // atomic-promote pattern the contract specifies.
   private async addPlaylistHandler(
     forUrl: string,
-    __filePath: string,
+    filePath: string,
     headers: any,
     reverseRes: ResponseInterface
   ) {
+    const key = CacheKeyPolicy.keyFor(forUrl);
+    this._lastHlsOwnerKey = key;
+
     try {
-      const port = this.runningPort!;
-      let playlistStr = '';
-
-      const { data, error, ...response } = await this._sessionTask.dataTask(
-        forUrl,
-        {
-          headers,
-        }
-      );
-
-      if (error) {
-        return reverseRes.send(
-          500,
-          'text/plain',
-          'Cannot get data from origin server'
-        );
+      let fetchResult;
+      try {
+        fetchResult = await this._sessionTask.dataTask(forUrl, { headers });
+      } catch (fetchError) {
+        // origin fetch threw (network/timeout) — same as an explicit `error`
+        return await this.respondWithCachedPlaylistOrError(key, reverseRes);
       }
 
-      playlistStr = reverseProxyPlaylist(data, forUrl, port);
+      const { data, error, ...response } = fetchResult;
+      if (error) {
+        return await this.respondWithCachedPlaylistOrError(key, reverseRes);
+      }
 
-      this.putCachedFile(forUrl, this.cacheFolder);
-      this.getCachedFile(forUrl);
-      //
-      reverseRes.send(
-        response.respInfo.status,
-        contentTypeOf(response.respInfo.headers, HLS_CONTENT_TYPE),
+      const port = this.runningPort!;
+      const playlistStr = reverseProxyPlaylist(data, forUrl, port);
+
+      try {
+        await this._storage.write(filePath, playlistStr);
+      } catch (writeError) {
+        return reverseRes.send(500, 'text/plain', 'WRITE_FAILED');
+      }
+
+      this.registerHlsOwner(
+        key,
+        filePath,
+        CacheManager.byteLengthOfBase64(playlistStr)
+      );
+      this.emitCacheStatus(key, 'MISS');
+
+      return reverseRes.send(
+        response.respInfo?.status ?? 200,
+        contentTypeOf(response.respInfo?.headers, HLS_CONTENT_TYPE),
         playlistStr
       );
-
-      // only put new origin file playlist to cache
-      // this._memoryCache?.syncCache(forUrl, filePath);
-    } catch (error) {
-      throw error;
+    } catch (unexpectedError) {
+      // R10: ANY other internal error still ends in a response — falls back
+      // to a previously cached playlist when one exists, else a mapped error.
+      if (reverseRes.closed !== true) {
+        try {
+          await this.respondWithCachedPlaylistOrError(key, reverseRes);
+        } catch (_fallbackError) {
+          // last-resort guard: the fallback itself failed before sending —
+          // still never leave the request hanging.
+          reverseRes.send(500, 'text/plain', 'WRITE_FAILED');
+        }
+      }
     }
   }
 
+  // TASK-008 (UC-IngestHlsSegment): owner lookup → fetch → write → append
+  // under the owner's CacheEntry.segmentPaths/bytes → respond. Always ends
+  // in reverseRes.send (R10) — the readStream callback runs its own
+  // try/catch since the outer try only wraps its synchronous invocation.
+  //
+  // BLOCKED (cross-scope dependency, r1-a1 WorkResult escalates): segment
+  // bytes are written directly to disk via `systemStorage.write` (unchanged
+  // from today), NOT via TASK-006's `writeTemp`/`verifyAndPromote` — same
+  // cross-scope gap as addPlaylistHandler above.
   private async addSegmentHandler(
     forUrl: string,
     filePath: string,
@@ -644,43 +883,81 @@ export class CacheManager
   ) {
     const systemStorage = this._storage;
     const sessionTask = this._sessionTask;
-    let absFilePath = absoluteFilePath(filePath, headers);
-    //
+    const absFilePath = absoluteFilePath(filePath, headers);
+    const ownerKey = this._lastHlsOwnerKey;
+
     try {
       systemStorage.readStream(absFilePath, async (streamData, streamError) => {
-        if (streamError) {
+        try {
+          if (!streamError) {
+            // already on disk (repeat request) — served from cache, no
+            // re-registration, no double count (boundary AC).
+            return reverseRes.send(200, HLS_VIDEO_TYPE, streamData);
+          }
+
+          if (!ownerKey || !this._memoryCache?.has(ownerKey)) {
+            // OWNER_ASSET_MISSING (defensive): a segment requested before
+            // its playlist was ever ingested.
+            return reverseRes.send(404, 'text/plain', 'OWNER_ASSET_MISSING');
+          }
+
           const { data, error, ...response } = await sessionTask.dataTask(
             forUrl,
-            {
-              headers,
-            }
+            { headers }
           );
 
           if (error) {
-            return reverseRes.send(
-              500,
-              'text/plain',
-              'Cannot get data from origin server'
-            );
+            return reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');
           }
-          //
 
-          // do not need to cache segment data
-          // this.syncMemoryCache(forUrl, data);
-          systemStorage.write(absFilePath, data);
-          // console.log('====== addSegmentHandler download cache: ', filePath);
+          try {
+            await systemStorage.write(absFilePath, data);
+          } catch (writeError) {
+            return reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');
+          }
+
+          this.registerSegmentUnderOwner(ownerKey, absFilePath, data);
 
           return reverseRes.send(
             200,
-            contentTypeOf(response.respInfo.headers, HLS_VIDEO_TYPE),
+            contentTypeOf(response.respInfo?.headers, HLS_VIDEO_TYPE),
             data
           );
+        } catch (innerError) {
+          if (reverseRes.closed !== true) {
+            reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');
+          }
         }
-        // console.log('====== addSegmentHandler found cache: ', filePath);
-        return reverseRes.send(200, HLS_VIDEO_TYPE, streamData);
       });
     } catch (error) {
-      throw error;
+      if (reverseRes.closed !== true) {
+        reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');
+      }
     }
+  }
+
+  // Appends `segmentPath` to the owner's segmentPaths and accumulates its
+  // bytes — skipped (no double count) if this exact path is already
+  // registered under the owner (boundary AC).
+  private registerSegmentUnderOwner(
+    ownerKey: string,
+    segmentPath: string,
+    data: string
+  ): void {
+    const owner = this._memoryCache?.get(ownerKey);
+    if (!owner || owner.kind !== 'hls') {
+      return;
+    }
+    if (owner.segmentPaths.includes(segmentPath)) {
+      return;
+    }
+
+    const bytes = CacheManager.byteLengthOfBase64(data);
+    const updated: CacheEntry = {
+      ...owner,
+      segmentPaths: [...owner.segmentPaths, segmentPath],
+      bytes: owner.bytes + bytes,
+    };
+    this._memoryCache?.put(ownerKey, updated);
   }
 }

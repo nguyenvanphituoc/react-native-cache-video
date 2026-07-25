@@ -10,25 +10,30 @@ import {
   mergeWithCustomCondition,
 } from '../Utils/util';
 
-import { FileBucket, FileSystemManager } from '../Libs/fileSystem';
-
 /**
  *
 - LFUSize (Least Recently Used by Size): The least recently used item is evicted. This bases the eviction check on cache directory size in MB.
  */
 // LFUSize (Least Frequently Used by Size) replacement policy
+//
+// TASK-009 (UC-EvictCacheAsset INV-03): `totalSize`/per-eviction bytes-freed
+// accounting is now REGISTRY-NATIVE — summed from each entry's own `bytes`
+// field already held in the `cache` Map passed in — never a disk rescan.
+// `storage.getStatisticList()` and the `cachedPath.includes(f.filename)` /
+// `path.includes(oldestFile.filename)` substring-matching this used to lean
+// on (a one-key-to-one-file assumption that silently broke for multi-file
+// HLS entries) are DELETED, not left dead — a net LOC reduction per the
+// resolved spike, not new complexity.
 export class LFUSizePolicy implements MemoryCachePolicyInterface {
   private isEvicting = false;
   private referenceBit: { [key in string]: number };
   private capacityBytes: number;
-  private storage: FileSystemManager;
 
   constructor(capacityMB: number) {
     this.referenceBit = {} as {
       [key in string]: number;
     };
     this.capacityBytes = capacityMB * 1024 * 1024; // Convert MB to bytes
-    this.storage = new FileSystemManager();
   }
 
   clear(): void {
@@ -65,67 +70,51 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
     try {
       this.isEvicting = true;
 
-      // Get current directory size
-      const files = await this.storage.getStatisticList(
-        this.storage.getBucketFolder(FileBucket.cache)
-      );
-
-      let totalSize = files.reduce(
-        (sum, file) => sum + parseInt(file.size as unknown as string, 10),
+      // Registry-native accounting: sum each entry's own `bytes` field —
+      // never a directory rescan (UC-EvictCacheAsset INV-03 / TS-INV-03).
+      let totalSize = Array.from(cache.values()).reduce(
+        (sum, entry) => sum + (entry?.bytes ?? 0),
         0
       );
-
-      // console.log('::::::::::::::::: REFERENCE_BIT', this.referenceBit);
-      // console.log('::::::::::::::::: CACHE', Object.fromEntries(cache));
 
       // Keep evicting least frequently used items until we're under capacity
       let count = 0;
       while (totalSize > this.capacityBytes) {
         count++;
 
-        // Don't evict if it's among last files, could be single giant file
-        // Don't try more than 10 files at a time per eviction check.
-        if (files.length <= 2 || count > 10) {
+        // Don't evict if it's among the last entries — could be a single
+        // giant asset. Don't try more than 10 candidates per check.
+        if (cache.size <= 2 || count > 10) {
           break;
         }
 
-        const evictedKey = this.findLFUKey(files, cache, triggerKey);
-        // console.log('::::::::::::: COUNT', count, ':::');
-        // console.log('::::::::::::: EVICTKEY', count, evictedKey, ':::');
-        // console.log('::::::::::::: FILES', count, files.length, ':::');
-
+        const evictedKey = this.findLFUKey(cache, triggerKey);
         if (!evictedKey) {
-          // Nothing left to evict or only the trigger file remains
+          // Nothing left to evict or only the trigger entry remains
           break;
         }
 
-        const cachedPath = cache.get(evictedKey);
-        // console.log('::::::::::::: CACHEPATH', count, cachedPath, ':::');
-        if (!cachedPath) {
-          delete this.referenceBit[evictedKey]; // Clean up stale reference
-          continue;
-        }
-
-        // Find the file size we're about to evict
-        const fileToEvict = files.find((f) => cachedPath.includes(f.filename));
-        if (!fileToEvict) {
-          // File doesn't exist on disk, clean up stale reference
+        const entry = cache.get(evictedKey);
+        if (!entry) {
+          // Stale reference, no registry entry behind it
           cache.delete(evictedKey);
           delete this.referenceBit[evictedKey];
           continue;
         }
 
-        // Evict the file
+        // BLOCKED (cross-scope dependency, r1-a1 WorkResult escalates):
+        // isEvictable(evictedKey) (TASK-005, pin-generation-guard scope
+        // substrate) should gate this eviction — a pinned/downloading
+        // candidate must be skipped and the next one tried instead.
+        // bumpGeneration(evictedKey) (TASK-005) should run here, before the
+        // unlink that delegate.didEvictHandler triggers. Neither primitive
+        // is available in this scope's substrate yet.
         cache.delete(evictedKey);
         delete this.referenceBit[evictedKey];
-        await delegate?.didEvictHandler(evictedKey, cachedPath);
+        await delegate?.didEvictHandler(evictedKey, entry);
 
-        // Update our running total
-        totalSize -= fileToEvict.size;
-        // file must exist or -1 will remove last item
-        files.splice(files.indexOf(fileToEvict), 1);
-
-        // console.log('::::::::::::: NewSize:', count, '||', totalSize, ':::');
+        // Update our running total from the registry's own bytes field.
+        totalSize -= entry.bytes ?? 0;
       }
     } finally {
       this.isEvicting = false;
@@ -133,7 +122,6 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
   }
 
   private findLFUKey(
-    files: Array<any>,
     cache: Map<string, any>,
     excludeKey?: string
   ): string | null {
@@ -141,7 +129,7 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
     let lfuKey: string | null = null;
 
     for (const key in this.referenceBit) {
-      // Skip the file that triggered eviction
+      // Skip the entry that triggered eviction
       if (key === excludeKey) continue;
 
       const freq = this.referenceBit[key];
@@ -153,29 +141,17 @@ export class LFUSizePolicy implements MemoryCachePolicyInterface {
       }
     }
 
-    // If all items have equal frequency, use the oldest file
+    // All tracked items share the same frequency (or none tracked yet):
+    // fall back to the least-recently-touched registry entry. `cache`
+    // preserves access/insertion order — `onAccess` re-inserts a key on
+    // every touch (delete + set), so its first eligible key IS the
+    // oldest-by-touch entry. This is the registry-only substitute for the
+    // deleted disk-mtime lookup (no disk rescan, TASK-009).
     if (!lfuKey && Object.keys(this.referenceBit).length > 0) {
-      const eligibleFiles = files.filter((file) => {
-        if (excludeKey) {
-          const excludePath = cache.get(excludeKey);
-          return !excludePath?.includes(file.filename);
-        }
-        return true;
-      });
-
-      // Find the oldest file
-      const oldestFile = eligibleFiles.reduce((oldest, current) => {
-        return oldest.lastModified < current.lastModified ? oldest : current;
-      });
-
-      // Find the referenceBit key that corresponds to this file
-      // Find which cache entry has this filename
-      lfuKey =
-        Array.from(cache.entries()).find(([_, path]) =>
-          path.includes(oldestFile.filename)
-        )?.[0] ||
-        cache.keys().next().value || // fallback to first (oldest) key
-        null;
+      const eligibleKeys = Array.from(cache.keys()).filter(
+        (key) => key !== excludeKey
+      );
+      lfuKey = eligibleKeys[0] ?? null;
     }
 
     return lfuKey;
