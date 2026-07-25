@@ -33,7 +33,11 @@ export type CacheEntry = (
 
 //
 // PrefetchWindow aggregate — domain-model.md#Aggregate-PrefetchWindow
-export type PrefetchItemStatus = 'queued' | 'downloading' | 'settled' | 'cancelled';
+export type PrefetchItemStatus =
+  | 'queued'
+  | 'downloading'
+  | 'settled'
+  | 'cancelled';
 
 export interface PrefetchItem {
   url: string;
