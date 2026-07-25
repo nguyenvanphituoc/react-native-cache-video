@@ -983,14 +983,20 @@ export class CacheManager
     const systemStorage = this._storage;
     const absFilePath = absoluteFilePath(filePath, headers);
     const ownerKey = this._lastHlsOwnerKey;
-    const segmentKey = CacheKeyPolicy.keyFor(forUrl);
 
     try {
       systemStorage.readStream(absFilePath, async (streamData, streamError) => {
         try {
           if (!streamError) {
-            // already on disk (repeat request) — served from cache, no
-            // re-registration, no double count (boundary AC).
+            // BUG-2 fix (r2-a1): already on disk, but not necessarily
+            // REGISTERED — a prefetched segment lands on disk without ever
+            // going through this handler's registration branch below. If an
+            // owner asset exists, register this path under it now (idempotent
+            // — registerSegmentUnderOwner no-ops on an already-listed path,
+            // so a genuine repeat request still does not double-count).
+            if (ownerKey) {
+              this.registerSegmentUnderOwner(ownerKey, absFilePath, streamData);
+            }
             return reverseRes.send(200, HLS_VIDEO_TYPE, streamData);
           }
 
@@ -1004,6 +1010,17 @@ export class CacheManager
           // TASK-005: generation captured from the OWNER key (segments have
           // no registry entry of their own — a whole-asset eviction bumps
           // the owner's generation) BEFORE the download starts.
+          //
+          // BUG-1 fix (r2-a1): the promote-time CHECK must also key off
+          // `ownerKey`, not a segment-local key — a segment's own generation
+          // counter is never bumped anywhere (only owner-level keys are
+          // bumped, by removeCachedVideo/eviction), so comparing against it
+          // could never detect a removal that happened mid-download. Both
+          // `writeTemp`'s downloading-mark and `verifyAndPromote`'s
+          // checkPromote guard now use `ownerKey` throughout this
+          // temp-write/verify window, so a remove/evict that bumps the
+          // owner's generation while this segment is in flight is correctly
+          // observed and the promote is discarded (no-resurrection, R4).
           const generation = getGeneration(ownerKey);
 
           let tempPath: string;
@@ -1012,7 +1029,7 @@ export class CacheManager
           try {
             const tempResult = await this._cacheFileRepo.writeTemp(
               forUrl,
-              segmentKey
+              ownerKey
             );
             tempPath = tempResult.tempPath;
             contentLength = tempResult.contentLength;
@@ -1024,7 +1041,7 @@ export class CacheManager
           const finalPath = await this._cacheFileRepo.verifyAndPromote(
             tempPath,
             contentLength,
-            segmentKey,
+            ownerKey,
             generation
           );
 

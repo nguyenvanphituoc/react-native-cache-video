@@ -27,6 +27,7 @@ import { CacheManager, CACHE_STATUS_EVENT } from '../ProxyCacheManager';
 import { FreePolicy } from '../Provider/MemoryCacheFreePolicy';
 import { KEY_PREFIX } from '../Utils/constants';
 import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
+import { tempCachePathFor } from '../Libs/fileSystem';
 import { recordEvents, resetTestHarness } from '../__mock__/harness';
 import BlobUtilMock from '../__mock__/react-native-blob-util';
 
@@ -79,6 +80,20 @@ function mockResponse() {
 async function waitForResponse(res: { calls: unknown[] }, maxTicks = 25) {
   for (let i = 0; i < maxTicks && res.calls.length === 0; i++) {
     await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+// setTimeout-based poll for anything driven off a manually-stalled fetch
+// promise (BUG-1 regression below needs to observe the in-flight dataTask
+// call before racing removeCachedVideo against it).
+async function waitFor(
+  predicate: () => boolean,
+  maxWaitMs = 5000,
+  stepMs = 5
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate() && Date.now() - start < maxWaitMs) {
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
   }
 }
 
@@ -465,5 +480,130 @@ describe('UC-IngestHlsSegment — Test Surface (TASK-008)', () => {
     const owner = manager.memoryCache?.get(ownerKey) as any;
     expect(owner.segmentPaths).toEqual([segmentFilePath(manager, SEGMENT_URL)]);
     expect(owner.bytes).toBeGreaterThan(0);
+  });
+
+  // r2-a1 regression — BUG-1 (SC-AC-04/SC-AC-06/DW-4): a segment's
+  // generation guard must observe the OWNER's live generation, not a
+  // segment-local one that is never bumped anywhere. Mirrors the r1
+  // discovery scenario (full-lifecycle.test.ts's now-superseded "addSegment
+  // Handler's generation guard is keyed by the SEGMENT" test) but asserts
+  // the FIXED outcome from inside this scope's own substrate.
+  it('BUG-1 fix: a segment write still in flight when its owner is removed mid-download does NOT resurrect the file on disk (no-resurrection, R4)', async () => {
+    const manager = await newReadyManager('hls-segment-bug1-fix');
+    const PLAYLIST = 'https://cdn.example.com/videos/bug1-fix/index.m3u8';
+    const SEGMENT = 'https://cdn.example.com/videos/bug1-fix/seg0.ts';
+    const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST);
+    const segPath = segmentFilePath(manager, SEGMENT);
+
+    BlobUtilMock.__setFetchResponse({
+      data: b64(SAMPLE_PLAYLIST),
+      headers: {},
+    });
+    const pRes = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST,
+      playlistFilePath(manager, PLAYLIST),
+      {},
+      pRes
+    );
+    expect(manager.memoryCache?.has(ownerKey)).toBe(true);
+
+    // stall the segment's origin fetch so removeCachedVideo can race it
+    const originalDataTask = (manager as any)._sessionTask.dataTask.bind(
+      (manager as any)._sessionTask
+    );
+    let resolveSegmentFetch: (v: any) => void = () => {};
+    (manager as any)._sessionTask.dataTask = jest.fn(
+      (url: string, options: any, callback?: any) => {
+        if (url === SEGMENT) {
+          return new Promise((resolve) => {
+            resolveSegmentFetch = resolve;
+          });
+        }
+        return originalDataTask(url, options, callback);
+      }
+    );
+
+    const segRes = mockResponse();
+    (manager as any).addSegmentHandler(SEGMENT, segPath, {}, segRes);
+    await waitFor(() =>
+      ((manager as any)._sessionTask.dataTask as jest.Mock).mock.calls.some(
+        ([u]: [string]) => u === SEGMENT
+      )
+    );
+
+    // owner removed WHILE the segment fetch is still in flight — bumps the
+    // owner's generation (the value addSegmentHandler captured BEFORE the
+    // fetch started is now stale).
+    await manager.removeCachedVideo(PLAYLIST);
+    expect(manager.memoryCache?.has(ownerKey)).toBe(false);
+
+    // the fetch "arrives" late with a clean, verifiable body
+    const lateBody = b64('late-segment-bytes');
+    BlobUtilMock.__seedFile(tempCachePathFor(segPath), lateBody);
+    resolveSegmentFetch({
+      respInfo: { headers: { 'Content-Length': String(lateBody.length) } },
+    });
+    await waitForResponse(segRes);
+
+    // FIXED: verifyAndPromote's checkPromote now compares against the
+    // OWNER's live (bumped) generation, so the late promote is discarded —
+    // the file never lands on its final path, and the owner stays absent.
+    expect(BlobUtilMock.__hasFile(segPath)).toBe(false);
+    expect(manager.memoryCache?.has(ownerKey)).toBe(false);
+    // still ends in exactly one defined response (R10) — the discard path
+    // still serves the player its bytes for THIS request.
+    expect(segRes.calls).toHaveLength(1);
+    expect(segRes.calls[0]?.code).toBe(200);
+  });
+
+  // r2-a1 regression — BUG-2 (SC-AC-03/DW-3): a segment served from the
+  // "already on disk" fast path (e.g. a prefetched-but-never-registered
+  // file) must be registered under its owner — bytes + segmentPaths — not
+  // silently served unaccounted.
+  it('BUG-2 fix: a segment already on disk with no prior registration (e.g. prefetched) is registered under the owner on the disk-first fast path', async () => {
+    const manager = await newReadyManager('hls-segment-bug2-fix');
+    const ownerKey = await ingestPlaylist(manager);
+    const bytesBeforeSegment = (manager.memoryCache?.get(ownerKey) as any)
+      .bytes;
+
+    const segPath = segmentFilePath(manager, SEGMENT_URL);
+    // simulate a segment prefetched straight to disk (PrefetchWindow's own
+    // path) WITHOUT ever going through addSegmentHandler's registration —
+    // the exact D6/BUG-2 starting condition.
+    const prefetchedBody = b64('prefetched-bytes-not-registered');
+    BlobUtilMock.__seedFile(segPath, prefetchedBody);
+    expect((manager.memoryCache?.get(ownerKey) as any).segmentPaths).toEqual(
+      []
+    );
+
+    const res = mockResponse();
+    await (manager as any).addSegmentHandler(SEGMENT_URL, segPath, {}, res);
+    await waitForResponse(res);
+
+    expect(res.calls[0]?.code).toBe(200);
+    const owner = manager.memoryCache?.get(ownerKey) as any;
+    expect(owner.segmentPaths).toEqual([segPath]);
+    expect(owner.bytes).toBe(
+      bytesBeforeSegment + Buffer.byteLength(prefetchedBody, 'base64')
+    );
+
+    // boundary: a genuine repeat request afterward must not double-count.
+    const repeatRes = mockResponse();
+    await (manager as any).addSegmentHandler(
+      SEGMENT_URL,
+      segPath,
+      {},
+      repeatRes
+    );
+    await waitForResponse(repeatRes);
+    const ownerAfterRepeat = manager.memoryCache?.get(ownerKey) as any;
+    expect(ownerAfterRepeat.segmentPaths).toEqual([segPath]);
+    expect(ownerAfterRepeat.bytes).toBe(owner.bytes);
+
+    // consequence check: the now-registered segment is no longer an
+    // untracked leak — removing the owner cleans it up.
+    await manager.removeCachedVideo(PLAYLIST_URL);
+    expect(BlobUtilMock.__hasFile(segPath)).toBe(false);
   });
 });
