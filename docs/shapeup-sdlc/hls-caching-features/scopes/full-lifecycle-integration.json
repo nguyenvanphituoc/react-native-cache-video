@@ -1,0 +1,18 @@
+{
+  "scope_id": "full-lifecycle-integration",
+  "topology_type": "CHOWDER",
+  "business_goal": "The mandatory final integration-test task: one end-to-end round trip exercising every UC together (ingest, prefetch, playback-priority, evict, remove, signature-rotation cache hit) plus the full R11 non-regression sweep of every pre-existing public export. Declared CHOWDER on purpose: cross-cutting verification with no single business flow of its own, depending on all six other scopes' finished work (TASK-014/015/016/017/018) rather than owning a vertical slice.",
+  "tasks": ["TASK-019"],
+  "allowed_file_substrate": [
+    "src/__tests__/full-lifecycle*.test.*",
+    "src/__tests__/integration*.test.*"
+  ],
+  "shared_substrate": [],
+  "affordance_manifest": [],
+  "e2e_verification_fixtures": [
+    "yarn test",
+    "yarn typecheck",
+    "yarn lint"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}

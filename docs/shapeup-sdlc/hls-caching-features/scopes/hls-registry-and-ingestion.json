@@ -1,0 +1,24 @@
+{
+  "scope_id": "hls-registry-and-ingestion",
+  "topology_type": "ICEBERG",
+  "business_goal": "An HLS playlist and its segments register as ONE asset with a real, registry-native byte total; the registry is version-tagged (a pre-v2 registry is discarded wholesale and its orphans swept once); eviction removes the whole asset atomically without ever rescanning disk; every playlist/segment request always terminates with a response (R2/R3/R6/R9/R10, A2/A3, UC-IngestHlsPlaylist + UC-IngestHlsSegment + UC-EvictCacheAsset, breadboard slices V2+V3).",
+  "tasks": ["TASK-004", "TASK-007", "TASK-008", "TASK-009", "TASK-016"],
+  "allowed_file_substrate": [
+    "src/ProxyCacheManager.ts",
+    "src/Provider/MemoryCacheProvider.ts",
+    "src/Provider/MemoryCacheLFUSizePolicy.ts",
+    "src/Libs/fileSystem.ts",
+    "src/__tests__/registry-eviction*.test.*",
+    "src/__tests__/hls-ingest*.test.*"
+  ],
+  "shared_substrate": [
+    "src/ProxyCacheManager.ts",
+    "src/Libs/fileSystem.ts"
+  ],
+  "affordance_manifest": [],
+  "e2e_verification_fixtures": [
+    "yarn test --testPathPattern 'registry-eviction|hls-ingest'",
+    "yarn typecheck"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}

@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "archetype": "library",
+  "entry_point": "src/index.tsx"
+}

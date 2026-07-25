@@ -1,0 +1,28 @@
+{
+  "scope_id": "prefetch-hook-wiring",
+  "topology_type": "LAYER_CAKE",
+  "business_goal": "An integrator plugs usePrefetch() into a FlatList's viewability signal and gets proximity-ordered prefetching for free, while every pre-existing public export keeps its exact signature — the one scope with an actual integrator-observable affordance (FeedListScreen's additive onViewableItemsChanged/viewabilityConfig wiring), thin and balanced across the library Hook layer and the example app (A6, R11, UC-UsePrefetchHook, breadboard slice V6).",
+  "tasks": ["TASK-013", "TASK-014"],
+  "allowed_file_substrate": [
+    "src/Hooks/usePrefetch.*",
+    "src/Hooks/index.ts",
+    "src/index.tsx",
+    "example/src/components/VideoList.tsx"
+  ],
+  "shared_substrate": [],
+  "affordance_manifest": [
+    {
+      "test_id": "feed-list-viewability",
+      "role": "prefetch-trigger",
+      "required_states": ["idle", "window-active", "scrolling-fast", "player-active"]
+    }
+  ],
+  "e2e_verification_fixtures": [
+    "yarn test --testPathPattern 'use-?prefetch'",
+    "yarn typecheck"
+  ],
+  "manual_checks": [
+    "TBD(manual): scroll-through in the example app (non-Expo) shows no crash and upcoming items warm ahead of open — TASK-014 AC's manual verification step, not jest-automatable against a real FlatList"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}

@@ -1,0 +1,24 @@
+{
+  "scope_id": "cache-key-identity",
+  "topology_type": "ICEBERG",
+  "business_goal": "A video cached once (HLS or mp4) is served from cache on every later request even after the CDN re-signs its URL, and a malformed URL never crashes — CacheKeyPolicy.keyFor/filePathFor replace the full-href and pathname-only key derivations at all 7 real call sites (R0/R1, A1, UC-NormalizeCacheKey, breadboard slice V1).",
+  "tasks": ["TASK-002", "TASK-003", "TASK-015"],
+  "allowed_file_substrate": [
+    "src/Utils/cacheKeyPolicy.ts",
+    "src/Utils/util.ts",
+    "src/ProxyCacheManager.ts",
+    "src/Provider/PreCacheProvider.ts",
+    "src/__tests__/cache-key-policy*.test.*",
+    "src/__tests__/signature-rotation*.test.*"
+  ],
+  "shared_substrate": [
+    "src/ProxyCacheManager.ts",
+    "src/Provider/PreCacheProvider.ts"
+  ],
+  "affordance_manifest": [],
+  "e2e_verification_fixtures": [
+    "yarn test --testPathPattern 'cache-key-policy|signature-rotation'",
+    "yarn typecheck"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}

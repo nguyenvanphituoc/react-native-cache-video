@@ -1,0 +1,28 @@
+{
+  "scope_id": "pin-generation-guard",
+  "topology_type": "ICEBERG",
+  "business_goal": "An in-use or in-flight cache entry is never evicted out from under it, and removing or evicting an entry cancels its in-flight download so it can never resurrect mid-download — pin refcount + generation guard primitives, generalized into the verified temp/verify/promote write path, consumed by explicit removal (R4/R5, A4, UC-PinAndReleaseAsset + UC-RemoveCacheAsset, breadboard slice V4).",
+  "tasks": ["TASK-005", "TASK-006", "TASK-010", "TASK-017"],
+  "allowed_file_substrate": [
+    "src/Libs/pinGenerationGuard.*",
+    "src/Libs/verifiedWrite.*",
+    "src/Libs/fileSystem.ts",
+    "src/Provider/PreCacheProvider.ts",
+    "src/ProxyCacheManager.ts",
+    "src/__tests__/pin-cancel*.test.*"
+  ],
+  "shared_substrate": [
+    "src/ProxyCacheManager.ts",
+    "src/Provider/PreCacheProvider.ts",
+    "src/Libs/fileSystem.ts"
+  ],
+  "affordance_manifest": [],
+  "e2e_verification_fixtures": [
+    "yarn test --testPathPattern 'pin-cancel'",
+    "yarn typecheck"
+  ],
+  "manual_checks": [
+    "TBD(device QA): react-native-blob-util StatefulPromise.cancel() abort fidelity on real iOS/Android devices is not jest-verifiable (pitch's own stated residual unknown) — deferred to the post-PASS QA edge hunt, not a t0 fixture"
+  ],
+  "hill_phase": "UPHILL_UNKNOWN"
+}
