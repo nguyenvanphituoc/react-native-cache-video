@@ -117,3 +117,8 @@ export interface SessionTaskInterface {
   cancelTask: (url: string) => void;
   cancelAllTask: () => void;
 }
+
+//
+// Shared cache-asset types (CacheEntry, AssetKind, AssetStatus, Generation, PinCount,
+// PrefetchDistance, PrefetchWindow, PrefetchItem) — canonical definitions in ./cacheAsset.
+export type * from './cacheAsset';
