@@ -16,10 +16,16 @@ import {
   PrefetchWindow,
   PREFETCH_WINDOW_CHANGED_EVENT,
   type VerifiedWriteRepo,
+  type HlsRegistryAwareDelegate,
 } from '../Provider/PrefetchWindow';
 import { PreCacheProvider } from '../Provider/PreCacheProvider';
+import { CacheManager } from '../ProxyCacheManager';
+import { FreePolicy } from '../Provider/MemoryCacheFreePolicy';
 import type { PrefetchAwareSessionTask } from '../Libs/session';
 import { recordEvents, resetTestHarness } from '../__mock__/harness';
+import BlobUtilMock from '../__mock__/react-native-blob-util';
+import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
+import { KEY_PREFIX } from '../Utils/constants';
 
 const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
 
@@ -432,5 +438,257 @@ describe('PreCacheProvider.preCacheFor(hlsUrl) — delegates into the prefetch r
 
     ingestSpy.mockRestore();
     warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BUG-3 fix (r2-a1, round-ledger D6): a prefetch-only (never-played) HLS
+// asset used to be invisible to CacheManager's registry — no owner entry
+// existed for R2/R3 byte-accounting or the R9 offline-playlist-fallback
+// path to see (see the EVAL report's BUG-3 / the now-superseded assertions
+// in full-lifecycle.test.ts's "Stage 7" describe block, whose own registry-
+// absence checks are the OLD, now-incorrect expectation this fix flips).
+// ---------------------------------------------------------------------------
+describe('BUG-3 fix: prefetchHlsAsset registers its playlist via the PreCacheDelegate seam (round-ledger D6)', () => {
+  const PLAYLIST_URL = 'https://cdn.example.com/stream/index.m3u8';
+
+  function createFakeHlsDelegate() {
+    const store = new Map<string, any>();
+    const onCachingPlaylistSource = jest.fn();
+    return {
+      onCachingPlaylistSource,
+      memoryCache: {
+        get: jest.fn((key: string) => store.get(key)),
+        put: jest.fn((key: string, value: any) => store.set(key, value)),
+      },
+      __store: store,
+    } satisfies HlsRegistryAwareDelegate & { __store: Map<string, any> };
+  }
+
+  it('unit: registers a kind:"hls" CacheEntry (playlistPath set, segmentPaths empty) under the playlist key via the delegate\'s memoryCache seam', async () => {
+    const session = createFakeSession();
+    session.dataTask.mockImplementation(async () => ({
+      data: b64(buildPlaylist(1)),
+    }));
+    const repo = createFakeRepo();
+    const delegate = createFakeHlsDelegate();
+    const window = new PrefetchWindow(session, {
+      cacheFileRepo: repo,
+      segmentCount: 1,
+      getDelegate: () => delegate,
+    });
+
+    const result = await window.prefetchHlsAsset(PLAYLIST_URL, 1);
+    expect(result.status).toBe('settled');
+
+    const key = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+    expect(delegate.memoryCache.put).toHaveBeenCalled();
+    const owner = delegate.__store.get(key);
+    expect(owner).toMatchObject({
+      kind: 'hls',
+      segmentPaths: [],
+    });
+    expect(typeof owner.playlistPath).toBe('string');
+    expect(owner.playlistPath.length).toBeGreaterThan(0);
+    // the generic PreCacheDelegate seam is also invoked (fix_hint: "the
+    // existing PreCacheDelegate.onCachingPlaylistSource seam")
+    expect(delegate.onCachingPlaylistSource).toHaveBeenCalledWith(
+      PLAYLIST_URL,
+      null,
+      expect.any(String)
+    );
+  });
+
+  it('unit: a delegate exposing only the narrower PreCacheDelegate contract (no memoryCache) degrades gracefully — no throw, generic registration still attempted', async () => {
+    const session = createFakeSession();
+    session.dataTask.mockImplementation(async () => ({
+      data: b64(buildPlaylist(1)),
+    }));
+    const repo = createFakeRepo();
+    const onCachingPlaylistSource = jest.fn();
+    const window = new PrefetchWindow(session, {
+      cacheFileRepo: repo,
+      segmentCount: 1,
+      getDelegate: () => ({ onCachingPlaylistSource }),
+    });
+
+    const result = await window.prefetchHlsAsset(PLAYLIST_URL, 1);
+    expect(result.status).toBe('settled');
+    expect(onCachingPlaylistSource).toHaveBeenCalledWith(
+      PLAYLIST_URL,
+      null,
+      expect.any(String)
+    );
+  });
+
+  it('unit: no getDelegate configured (default) — registration is a complete no-op, existing callers are unaffected', async () => {
+    const session = createFakeSession();
+    session.dataTask.mockImplementation(async () => ({
+      data: b64(buildPlaylist(1)),
+    }));
+    const repo = createFakeRepo();
+    const window = new PrefetchWindow(session, {
+      cacheFileRepo: repo,
+      segmentCount: 1,
+    });
+
+    const result = await window.prefetchHlsAsset(PLAYLIST_URL, 1);
+    expect(result.status).toBe('settled');
+    // exactly 1 verifyAndPromote call (the segment) — no extra playlist
+    // write was attempted without a delegate.
+    expect(repo.verifyAndPromote).toHaveBeenCalledTimes(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Integration: driven through the REAL CacheManager (same convention as
+  // full-lifecycle.test.ts's Stage 5/7) — proves the fix end-to-end through
+  // the actual PreCacheProvider.delegate wiring, not just PrefetchWindow in
+  // isolation.
+  // -------------------------------------------------------------------------
+  describe('integration (real CacheManager, D6 AC a/b)', () => {
+    const b64Real = (text: string) =>
+      Buffer.from(text, 'utf8').toString('base64');
+
+    function buildRealPlaylist(segmentNames: string[]): string {
+      const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
+      segmentNames.forEach((name) => {
+        lines.push('#EXTINF:10.0,');
+        lines.push(name);
+      });
+      lines.push('#EXT-X-ENDLIST');
+      return lines.join('\n');
+    }
+
+    function mockResponse() {
+      const calls: Array<{ method: string; code: number; body?: string }> = [];
+      return {
+        requestId: 'test-request',
+        closed: false,
+        send(code: number, _type: string, body: string) {
+          this.closed = true;
+          calls.push({ method: 'send', code, body });
+        },
+        json(obj: any, code = 200) {
+          this.closed = true;
+          calls.push({ method: 'json', code, body: JSON.stringify(obj) });
+        },
+        html(html: string, code = 200) {
+          this.closed = true;
+          calls.push({ method: 'html', code, body: html });
+        },
+        calls,
+      };
+    }
+
+    // Real-timer poll (mirrors full-lifecycle.test.ts's own `waitFor`) —
+    // PrefetchWindow's `waitUntilNotBusy` can fall back to a real 250ms
+    // `setTimeout` tick; a pure-microtask loop is not guaranteed to let it
+    // fire against the REAL SimpleSessionProvider/CacheManager stack used
+    // here (unlike this file's other tests, which use a fully synchronous
+    // fake session).
+    async function waitForReal(
+      predicate: () => boolean,
+      maxWaitMs = 5000,
+      stepMs = 25
+    ): Promise<void> {
+      const start = Date.now();
+      while (!predicate() && Date.now() - start < maxWaitMs) {
+        await new Promise((resolve) => setTimeout(resolve, stepMs));
+      }
+    }
+
+    it('(a) after a prefetch-only warm, the owner key exists in the registry with the playlist path', async () => {
+      const manager = new CacheManager('bug3-registry-visible', true);
+      manager.enableMemoryCache(new FreePolicy());
+      await manager.enableBridgeServer(55190);
+
+      const HLS_PLAYLIST_URL =
+        'https://cdn.example.com/videos/bug3-a/index.m3u8';
+      const SEG0 = 'https://cdn.example.com/videos/bug3-a/seg0.ts';
+      const ownerKey = CacheKeyPolicy.keyFor(HLS_PLAYLIST_URL);
+      const playlistPath = CacheKeyPolicy.filePathFor(
+        HLS_PLAYLIST_URL,
+        manager.cacheFolder,
+        KEY_PREFIX
+      );
+      const seg0Path = CacheKeyPolicy.filePathFor(
+        SEG0,
+        manager.cacheFolder,
+        KEY_PREFIX
+      );
+
+      BlobUtilMock.__queueFetchResponse({
+        data: b64Real(buildRealPlaylist(['seg0.ts'])),
+        headers: {},
+      });
+      const seg0Payload = 'seg0-bug3-bytes';
+      BlobUtilMock.__queueFetchResponse({
+        data: b64Real(seg0Payload),
+        headers: { 'Content-Length': String(b64Real(seg0Payload).length) },
+      });
+
+      manager.setActiveWindow([HLS_PLAYLIST_URL], 0, {
+        ahead: 0,
+        behind: 0,
+        segmentCount: 1,
+      });
+      await waitForReal(() => BlobUtilMock.__hasFile(seg0Path));
+
+      const owner = manager.memoryCache?.get(ownerKey) as any;
+      expect(owner).toBeDefined();
+      expect(owner.kind).toBe('hls');
+      expect(owner.playlistPath).toBe(playlistPath);
+      expect(BlobUtilMock.__hasFile(playlistPath)).toBe(true);
+    }, 15000);
+
+    it('(b) an origin-down FIRST playlist request for a prefetch-only asset now gets 200 stale-fallback (was 502)', async () => {
+      const manager = new CacheManager('bug3-stale-fallback', true);
+      manager.enableMemoryCache(new FreePolicy());
+      await manager.enableBridgeServer(55191);
+
+      const HLS_PLAYLIST_URL =
+        'https://cdn.example.com/videos/bug3-b/index.m3u8';
+      const SEG0 = 'https://cdn.example.com/videos/bug3-b/seg0.ts';
+      const seg0Path = CacheKeyPolicy.filePathFor(
+        SEG0,
+        manager.cacheFolder,
+        KEY_PREFIX
+      );
+
+      BlobUtilMock.__queueFetchResponse({
+        data: b64Real(buildRealPlaylist(['seg0.ts'])),
+        headers: {},
+      });
+      const seg0Payload = 'seg0-bug3b-bytes';
+      BlobUtilMock.__queueFetchResponse({
+        data: b64Real(seg0Payload),
+        headers: { 'Content-Length': String(b64Real(seg0Payload).length) },
+      });
+
+      manager.setActiveWindow([HLS_PLAYLIST_URL], 0, {
+        ahead: 0,
+        behind: 0,
+        segmentCount: 1,
+      });
+      await waitForReal(() => BlobUtilMock.__hasFile(seg0Path));
+
+      // the player now tries to play it for the FIRST time — origin is down
+      BlobUtilMock.__setFetchError(new Error('origin unreachable'));
+      const res = mockResponse();
+      await (manager as any).addPlaylistHandler(
+        HLS_PLAYLIST_URL,
+        CacheKeyPolicy.filePathFor(
+          HLS_PLAYLIST_URL,
+          manager.cacheFolder,
+          KEY_PREFIX
+        ),
+        {},
+        res
+      );
+
+      expect(res.calls).toHaveLength(1);
+      expect(res.calls[0]?.code).toBe(200);
+      expect(res.calls[0]?.body).toEqual(expect.any(String));
+    }, 15000);
   });
 });

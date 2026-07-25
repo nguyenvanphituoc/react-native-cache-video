@@ -82,6 +82,11 @@ export class PreCacheProvider implements PreCacheInterface {
       // UC-PrefetchHlsAsset step 4: media items in the window queue reuse
       // this SAME instance's own (unchanged) mp4 verified-write path.
       mediaIngestor: (url: string) => this.prepareSourceMedia(url),
+      // BUG-3 fix (r2-a1, round-ledger D6): a LIVE accessor, not a snapshot
+      // — `this.delegate` is assigned by `CacheManager` right after this
+      // constructor returns (ProxyCacheManager.ts:207-208), so reading it
+      // lazily on every prefetch is required, not just defensive.
+      getDelegate: () => this.delegate,
     });
     //
   }

@@ -23,20 +23,32 @@
 // `CacheKeyPolicy.filePathFor` derives, so a later real segment request
 // (`addSegmentHandler`'s disk-first `readStream` branch) is served as a
 // cache hit with no re-download, without needing direct access to
-// `CacheManager`'s private in-memory registry. What this module does NOT
-// achieve without that cross-scope access: registering the prefetched HLS
-// asset under `CacheManager`'s own registry (so eviction byte-accounting and
-// the offline-playlist-fallback path see it). See escalates[] for the
-// follow-up question.
+// `CacheManager`'s private in-memory registry.
+//
+// BUG-3 fix (r2-a1, round-ledger D6): a prefetch-only (never-played) HLS
+// asset used to be invisible to `CacheManager`'s registry — no owner entry
+// existed for eviction byte-accounting (R2/R3) or the offline-playlist-
+// fallback path (R9) to see. Closed via the EXISTING `PreCacheDelegate` seam
+// (`CacheManager.onCachingPlaylistSource`, already wired to
+// `PreCacheProvider.delegate`) — see `registerPrefetchedPlaylist` below. No
+// substrate widening: `ProxyCacheManager.ts` is neither imported for its
+// concrete class nor edited, only reached through the delegate reference
+// PreCacheProvider already holds, feature-detected the same way
+// `sessionTask.isBusy()` is above (`HlsRegistryAwareDelegate`).
 
 import { DeviceEventEmitter } from 'react-native';
 
-import type { SessionTaskInterface } from '../types/type';
+import type { SessionTaskInterface, CacheEntry } from '../types/type';
 import type { PrefetchAwareSessionTask } from '../Libs/session';
-import type { FileSystemManager } from '../Libs/fileSystem';
+import {
+  FileBucket,
+  FileSystemManager,
+  tempCachePathFor,
+} from '../Libs/fileSystem';
 import { CacheFileRepository } from '../Libs/verifiedWrite';
 import { getGeneration } from '../Libs/pinGenerationGuard';
 import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
+import { KEY_PREFIX } from '../Utils/constants';
 import { absoluteURL, isHLSUrl } from '../Utils/util';
 
 // Narrow, structural view of CacheFileRepository (TASK-006) — declared
@@ -56,6 +68,26 @@ export interface VerifiedWriteRepo {
     key: string,
     generation: number
   ): Promise<string | null>;
+}
+
+// BUG-3 fix (r2-a1): structural, feature-detected superset of
+// `PreCacheDelegate` (src/types/type.d.ts, outside this scope's substrate —
+// only IMPORTED for its `CacheEntry` type below, never edited). The CONCRETE
+// delegate `CacheManager` assigns to `PreCacheProvider.delegate`
+// (ProxyCacheManager.ts:207-208) already exposes a public `memoryCache`
+// getter (ProxyCacheManager.ts:215-216) beyond what `PreCacheDelegate`'s own
+// narrower type declares — this module reaches it the same way
+// `sessionTask.isBusy()`/`markPrefetch()` are feature-detected below, so
+// nothing outside this scope's substrate is ever imported or edited. Every
+// member is optional: a delegate satisfying only the narrower
+// `PreCacheDelegate` contract (e.g. a test double) degrades gracefully —
+// `registerPrefetchedPlaylist` stops at whichever members are present.
+export interface HlsRegistryAwareDelegate {
+  onCachingPlaylistSource?: (forKey: string, data: any, folder: string) => void;
+  memoryCache?: {
+    get(key: string): CacheEntry | undefined;
+    put(key: string, value: CacheEntry): void;
+  };
 }
 
 // RNCV_* DeviceEventEmitter convention (matches CACHE_ENTRY_DISCARDED_EVENT /
@@ -118,11 +150,28 @@ export class PrefetchWindow {
   private cacheFileRepo: VerifiedWriteRepo;
   private mediaIngestor: (url: string) => Promise<string>;
   private draining = false;
+  // BUG-3 fix (r2-a1): own `FileSystemManager` reference (mirrors
+  // `PreCacheProvider.storage`) so `registerPrefetchedPlaylist` can write the
+  // playlist body to its temp path itself (`CacheFileRepository.writeTemp`
+  // downloads direct-from-URL — no hook for handing it already-fetched
+  // text). Same instance `CacheFileRepository` derives its bucket folder
+  // from when the caller doesn't inject an override, so the computed final
+  // path always matches.
+  private storage: FileSystemManager;
+  // BUG-3 fix (r2-a1): live accessor for `PreCacheProvider.delegate`
+  // (`CacheManager`, assigned to `PreCacheProvider` AFTER construction —
+  // ProxyCacheManager.ts:207-208). Read lazily on every call, never captured
+  // at construction time, so registration works regardless of assignment
+  // order and reflects a delegate swapped later.
+  private getDelegate?: () => HlsRegistryAwareDelegate | undefined;
 
-  // No `cacheFolder` parameter: every write this class performs goes through
-  // `CacheFileRepository`, which derives its own bucket folder from the
-  // `FileSystemManager` it was built with (same convention as TASK-006/007/008)
-  // — this class never needs to compute a final path itself.
+  // `cacheFolder` (used only by `registerPrefetchedPlaylist`, BUG-3 fix) is
+  // NOT a constructor parameter — every write this class performs derives
+  // its own bucket folder from `storage.getBucketFolder(FileBucket.cache)`
+  // (same convention as `CacheFileRepository`'s private `cacheFolder`
+  // getter, TASK-006/007/008), so it is always identical to
+  // `PreCacheProvider.cacheFolder`/`CacheManager.cacheFolder` without this
+  // class needing it passed in.
   constructor(
     sessionTask: SessionTaskInterface,
     opts?: {
@@ -136,14 +185,21 @@ export class PrefetchWindow {
        *  PreCacheProvider, wiring its own `prepareSourceMedia`) doesn't
        *  inject the real one — keeps this class independently testable. */
       mediaIngestor?: (url: string) => Promise<string>;
+      /** BUG-3 fix (r2-a1): see `getDelegate` field doc above. Omitted
+       *  (default `undefined`) means `registerPrefetchedPlaylist` is a
+       *  complete no-op — every existing caller/test that doesn't wire this
+       *  keeps its exact prior behavior. */
+      getDelegate?: () => HlsRegistryAwareDelegate | undefined;
     }
   ) {
     this.sessionTask = sessionTask;
     this.segmentCount = opts?.segmentCount ?? DEFAULT_SEGMENT_COUNT;
+    this.storage = opts?.storage ?? new FileSystemManager();
     this.cacheFileRepo =
       opts?.cacheFileRepo ??
       new CacheFileRepository(sessionTask, opts?.storage);
     this.mediaIngestor = opts?.mediaIngestor ?? this.defaultIngestMedia;
+    this.getDelegate = opts?.getDelegate;
   }
 
   // - MARK: isBusy() feature-detection (D3 fallback)
@@ -348,14 +404,25 @@ export class PrefetchWindow {
     }
 
     let segmentUrls: string[];
+    let playlistText: string;
     try {
-      segmentUrls = await this.fetchPlaylistSegmentUrls(url);
+      const fetched = await this.fetchPlaylist(url);
+      segmentUrls = fetched.segmentUrls;
+      playlistText = fetched.text;
     } catch (error) {
       // PREFETCH_CANCELLED-equivalent: origin/network failure while
       // ingesting the playlist — stop cleanly, no error surfaced to any
       // caller (no caller is waiting synchronously on a prefetch).
       return { url, status: 'cancelled', segmentsIngested: 0 };
     }
+
+    // BUG-3 fix (r2-a1): register the playlist itself under CacheManager's
+    // registry (round-ledger D6) — independent of the segment loop below,
+    // best-effort (never throws, never blocks segment ingestion even on
+    // failure). Registered regardless of `isCancelled()` immediately after:
+    // the playlist body was already fully fetched, so caching it is valid
+    // even if the item leaves the window before any segment starts.
+    await this.registerPrefetchedPlaylist(url, playlistText);
 
     if (isCancelled()) {
       return { url, status: 'cancelled', segmentsIngested: 0 };
@@ -407,10 +474,12 @@ export class PrefetchWindow {
   // isBusy()) and resolve its segment URIs to absolute URLs via the SAME
   // `absoluteURL` helper `processPlaylistLine` uses for the proxy's own
   // playlist rewrite (Utils/util.ts) — lines starting with '#' are tags,
-  // everything else is a segment URI (relative or absolute).
-  private async fetchPlaylistSegmentUrls(
+  // everything else is a segment URI (relative or absolute). Also returns
+  // the decoded raw text (BUG-3 fix, r2-a1) so `registerPrefetchedPlaylist`
+  // can persist it without re-fetching.
+  private async fetchPlaylist(
     playlistUrl: string
-  ): Promise<string[]> {
+  ): Promise<{ text: string; segmentUrls: string[] }> {
     this.markPrefetch(playlistUrl, true);
     let response;
     try {
@@ -422,11 +491,104 @@ export class PrefetchWindow {
     const Buffer = require('buffer').Buffer;
     const text = Buffer.from(response?.data ?? '', 'base64').toString('utf8');
 
-    return text
+    const segmentUrls = text
       .split('\n')
       .map((line: string) => line.trim())
       .filter((line: string) => line.length > 0 && !line.startsWith('#'))
       .map((line: string) => absoluteURL(line, playlistUrl));
+
+    return { text, segmentUrls };
+  }
+
+  // BUG-3 fix (r2-a1, round-ledger D6): the prescribed fix route — invoke
+  // the EXISTING `PreCacheDelegate` seam (`onCachingPlaylistSource`, already
+  // wired to `PreCacheProvider.delegate`) so a prefetched playlist is
+  // "registered the same way a played one is" (fix_hint, EVAL BUG-3), no
+  // substrate widening (ProxyCacheManager.ts is neither imported nor
+  // edited). Writes the playlist body through the SAME verified-write
+  // primitive (temp write -> verifyAndPromote, TASK-006) as
+  // `ProxyCacheManager.addPlaylistHandler`, at the IDENTICAL final path
+  // `CacheKeyPolicy.filePathFor` derives — the exact disk path the offline
+  // fallback (`respondWithCachedPlaylistOrError`) reads from.
+  //
+  // `onCachingPlaylistSource` alone only ever produces a `kind: 'media'`
+  // `CacheEntry` (`PreCacheDelegate`'s own generic-media contract) — the
+  // offline-fallback branch specifically requires `kind: 'hls'` +
+  // `playlistPath` (the shape `CacheManager`'s own private `registerHlsOwner`
+  // produces for a real ingest). Closing that gap without touching
+  // `ProxyCacheManager.ts` means reaching the SAME public `memoryCache`
+  // getter `registerHlsOwner` itself writes through (already used directly
+  // by this repo's own integration tests) and replicating its exact
+  // upsert shape — feature-detected via `HlsRegistryAwareDelegate`, so a
+  // delegate exposing only the narrower `PreCacheDelegate` contract still
+  // gets the generic (media-kind) registration and simply skips the rest.
+  private async registerPrefetchedPlaylist(
+    url: string,
+    rawText: string
+  ): Promise<void> {
+    const delegate = this.getDelegate?.();
+    if (!delegate) {
+      return;
+    }
+
+    try {
+      const folder = this.storage.getBucketFolder(FileBucket.cache);
+      const key = CacheKeyPolicy.keyFor(url);
+      const finalPath = CacheKeyPolicy.filePathFor(url, folder, KEY_PREFIX);
+      const tempPath = tempCachePathFor(finalPath);
+      // TASK-005: generation captured BEFORE the write starts — a concurrent
+      // remove/evict of this same owner key bumps it, so a promote that
+      // lands after is correctly discarded (R4, no-resurrection guard),
+      // exactly like `addPlaylistHandler`'s own generation capture.
+      const generation = getGeneration(key);
+      const Buffer = require('buffer').Buffer;
+      const contentLength = Buffer.byteLength(rawText, 'utf8');
+
+      await this.storage.write(tempPath, rawText, 'utf8');
+      const promoted = await this.cacheFileRepo.verifyAndPromote(
+        tempPath,
+        contentLength,
+        key,
+        generation
+      );
+      if (promoted === null) {
+        // AssetDiscarded (size mismatch / stale generation) — never
+        // register a write that didn't verify/promote.
+        return;
+      }
+
+      // Generic registration (PreCacheDelegate's documented contract) —
+      // `data: null` mirrors `prepareSourceMedia`'s own "already written to
+      // disk, just register" call (PreCacheProvider.ts) since the body was
+      // just promoted above, not passed through here.
+      delegate.onCachingPlaylistSource?.(url, null, folder);
+
+      // HLS-shaped registration ("the same way a played one is") —
+      // replicates `registerHlsOwner`'s exact upsert: refresh `playlistPath`
+      // on an existing `hls` entry (never touching its accumulated
+      // `segmentPaths`/`bytes`/`generation`/`pinCount`), else create a fresh
+      // one.
+      const registry = delegate.memoryCache;
+      if (registry?.get && registry?.put) {
+        const existing = registry.get(key);
+        if (existing && existing.kind === 'hls') {
+          registry.put(key, { ...existing, playlistPath: promoted });
+        } else {
+          registry.put(key, {
+            kind: 'hls',
+            playlistPath: promoted,
+            segmentPaths: [],
+            bytes: contentLength,
+            generation: 0,
+            pinCount: 0,
+          });
+        }
+      }
+    } catch (error) {
+      // Best-effort: a registration failure never blocks this caller's
+      // segment ingestion (matches ingestSegment's own swallow-and-continue
+      // style below).
+    }
   }
 
   // Verified-write a single segment (TASK-006 writeTemp/verifyAndPromote —
