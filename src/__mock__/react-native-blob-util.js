@@ -79,10 +79,18 @@ const fs = {
 
   mv: jest.fn(async (from, to) => {
     const source = normalize(from);
+    const dest = normalize(to);
     if (!files.has(source)) {
       throw new Error(`mv failed: source '${from}' does not exist`);
     }
-    files.set(normalize(to), files.get(source));
+    // Real react-native-blob-util fs.mv FAILS when the destination already
+    // exists (BUG-6, confirmed on-device) — the mock used to silently
+    // overwrite, which is the fidelity gap that let 244 tests pass over a
+    // real bug. Match real iOS semantics: reject on an existing destination.
+    if (files.has(dest)) {
+      throw new Error(`mv failed: destination '${to}' already exists`);
+    }
+    files.set(dest, files.get(source));
     files.delete(source);
     return true;
   }),

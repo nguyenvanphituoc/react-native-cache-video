@@ -114,6 +114,39 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
     expect(result).toBe(finalPath);
   });
 
+  it('BUG-6 regression: re-ingesting the same key (finalPath already on disk from a prior promote — second-session replay) still promotes cleanly, single final file with the new bytes', async () => {
+    // first ingest: destination does not exist yet — the common path.
+    BlobUtilMock.__seedFile(tempPath, 'first-ingest-bytes');
+    const first = await repo.verifyAndPromote(
+      tempPath,
+      'first-ingest-bytes'.length,
+      KEY,
+      0
+    );
+    expect(first).toBe(finalPath);
+    expect(BlobUtilMock.__getFile(finalPath)).toBe('first-ingest-bytes');
+
+    // second ingest of the SAME key: finalPath already exists on disk —
+    // real react-native-blob-util fs.mv FAILS on this (BUG-6); the mock now
+    // rejects on an existing destination too, so this only passes if
+    // moveFile clears the destination before the atomic move.
+    BlobUtilMock.__seedFile(tempPath, 'second-ingest-bytes-longer');
+    const second = await repo.verifyAndPromote(
+      tempPath,
+      'second-ingest-bytes-longer'.length,
+      KEY,
+      0
+    );
+
+    expect(second).toBe(finalPath);
+    expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
+    // single final file, holding the NEW bytes — not a stale leftover of
+    // the first promote, not a throw from the second.
+    expect(BlobUtilMock.__getFile(finalPath)).toBe(
+      'second-ingest-bytes-longer'
+    );
+  });
+
   it('missing Content-Length (chunked transfer) → NOT verifiable → null returned, temp discarded, atomic move never attempted', async () => {
     BlobUtilMock.__seedFile(tempPath, 'chunked-payload');
 

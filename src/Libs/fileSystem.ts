@@ -137,7 +137,23 @@ export class FileSystemManager {
   // Atomic promote: `fs.mv` is a rename when source and destination share a
   // directory — unlike `copyfile` (cp + unlink), a crash mid-call can never
   // leave a half-written file at the destination.
+  //
+  // BUG-6 (device smoke, 2026-07-26): on real iOS, `fs.mv` FAILS when
+  // `toPath` already exists — any re-ingest of an already-cached
+  // playlist/segment/asset (e.g. a second playback session) hits this on
+  // every promote and the whole session 500s. Callers that need
+  // eviction-safety (verifyAndPromote's generation check) already gate the
+  // call to moveFile on that check BEFORE ever reaching here, so by the
+  // time we get here this promote is authorized to replace whatever is at
+  // `toPath` — clear it first (a missing destination, the common first-
+  // promote case, is not an error) so the rename can proceed.
   async moveFile(fromPath: string, toPath: string): Promise<void> {
+    try {
+      await FSManager.unlink(toPath);
+    } catch (error) {
+      // destination didn't exist — expected on the common (first-promote)
+      // path, not an error.
+    }
     await FSManager.mv(fromPath, toPath);
   }
 
