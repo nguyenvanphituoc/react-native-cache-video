@@ -26,8 +26,8 @@ structure ingestion/eviction directly operate on (no independent business flow o
 |---|---|---|---|---|---|---|---|
 | [shared-cache-types](scopes/shared-cache-types.json) | CHOWDER | TASK-001 (1) | 2 globs / 1 file — shared TS types only | — | `yarn typecheck` | — | ✅ clean |
 | [cache-key-identity](scopes/cache-key-identity.json) | ICEBERG | TASK-002, 003, 015 (3) | 6 globs / 3 files — Utils policy + ProxyCacheManager call sites + PreCacheProvider call sites | ProxyCacheManager.ts, PreCacheProvider.ts | `jest (cache-key-policy\|signature-rotation)` + typecheck | — | ✅ clean |
-| [hls-registry-and-ingestion](scopes/hls-registry-and-ingestion.json) | ICEBERG | TASK-004, 007, 008, 009, 016 (5) | 6 globs / 4 files — registry v2 + playlist/segment handlers + eviction policy | ProxyCacheManager.ts, fileSystem.ts | `jest (registry-eviction\|hls-ingest)` + typecheck | — | ✅ clean |
-| [pin-generation-guard](scopes/pin-generation-guard.json) | ICEBERG | TASK-005, 006, 010, 017 (4) | 6 globs / 3 files — pin/gen primitives + verified-write generalization + removal cancel | ProxyCacheManager.ts, PreCacheProvider.ts, fileSystem.ts | `jest (pin-cancel)` + typecheck | TBD(device QA): blob-util cancel fidelity on real devices | ✅ clean |
+| [hls-registry-and-ingestion](scopes/hls-registry-and-ingestion.json) | ICEBERG | TASK-004, 007, 008, 009, 016 (5) | 8 globs / 5 files — registry v2 + playlist/segment handlers + eviction policy + httpProxy.ts transport seam (BUG-7/BUG-8, round-4 remap) | ProxyCacheManager.ts, fileSystem.ts | `jest (registry-eviction\|hls-ingest\|http-proxy)` + typecheck | TBD(regression test): http-proxy*.test.* fixture not yet written | ✅ clean |
+| [pin-generation-guard](scopes/pin-generation-guard.json) | ICEBERG | TASK-005, 006, 010, 017 (4) | 7 globs / 4 files — pin/gen primitives + verified-write generalization + removal cancel + react-native-blob-util.js jest mock (BUG-6 mock-fidelity companion, round-4 remap) | ProxyCacheManager.ts, PreCacheProvider.ts, fileSystem.ts | `jest (pin-cancel)` + full `yarn test` + typecheck | TBD(device QA): blob-util cancel fidelity on real devices; CAUTION: mock mv() change is observable by every other scope's tests (read-only for them) | ✅ clean |
 | [sliding-window-prefetch](scopes/sliding-window-prefetch.json) | ICEBERG | TASK-011, 012, 018 (3) | 4 globs / 2 files — window diff queue + serial drain + isBusy() gate | PreCacheProvider.ts | `jest (prefetch-window)` + typecheck | — | ✅ clean |
 | [prefetch-hook-wiring](scopes/prefetch-hook-wiring.json) | LAYER_CAKE | TASK-013, 014 (2) | 4 globs / 3 files — usePrefetch hook + public export + example FlatList wiring | — | `jest (use-?prefetch)` + typecheck | TBD(manual): example-app scroll-through demo | ✅ clean |
 | [full-lifecycle-integration](scopes/full-lifecycle-integration.json) | CHOWDER | TASK-019 (1) | 2 globs / 0 files — new integration test only | — | full `yarn test` + typecheck + lint | TBD(device QA): blob-util cancel fidelity (shared with pin-generation-guard) | ✅ clean |
@@ -36,7 +36,27 @@ structure ingestion/eviction directly operate on (no independent business flow o
 entry verbatim); non-executable ship-time checks live in each contract's `manual_checks[]`,
 which t0-verify does not read.
 
-**Coverage:** 19/19 board tasks mapped, each to exactly one scope.
+**Round-4 remap (2026-07-26, on-device smoke):** two files no scope's substrate claimed
+needed writes for the round-4 device-smoke bugs (harness-run.md, "On-device smoke
+2026-07-26"). `src/Libs/httpProxy.ts` (BUG-7 duplicate `httpServerResponseReceived`
+listener dedupe + BUG-8 base64 error-body corruption) joined `hls-registry-and-ingestion` —
+it is the request/response transport seam behind that scope's own "every playlist/segment
+request always terminates with a response" business goal, and `ProxyCacheManager.ts`
+(already this scope's shared_substrate) is httpProxy.ts's sole production caller.
+`src/__mock__/react-native-blob-util.js` (BUG-6 mock-fidelity companion: jest VFS `mv` must
+reject on an existing destination, matching real iOS `fs.mv`) joined `pin-generation-guard`
+— BUG-6's actual code fix lands in `verifiedWrite.ts`/`fileSystem.ts`, already this scope's
+substrate, and the mock fix is that fix's regression-test enabler. Neither file was added to
+any `shared_substrate` array: no second scope gains write access to either file. The mock
+file remains a **read-only** dependency of nearly every other scope's test suite, flagged as
+a manual caution rather than a shared_substrate entry (shared_substrate is for ≥2 scopes'
+*write* overlap, not read fan-out) — `pin-generation-guard`'s fixtures now run the full
+`yarn test`, not just its own pattern, specifically to catch any other suite relying on the
+old silent-overwrite `mv()` semantics. Both extensions kept substrates disjoint (spec-lint
+DISJOINT = 0) and neither scope now spans more than 8 globs (PA2 cap is ~15).
+
+**Coverage:** 19/19 board tasks mapped, each to exactly one scope. BUG-6/BUG-7/BUG-8 are
+round-4 discovered bugs (not board tasks) whose fix now has a substrate home per the above.
 **Shared-substrate hot spots:** `src/ProxyCacheManager.ts` is declared shared by 3 scopes
 (`cache-key-identity`, `hls-registry-and-ingestion`, `pin-generation-guard` — it hosts the
 key-derivation call sites, the registry instantiate/save/load, the playlist/segment/eviction

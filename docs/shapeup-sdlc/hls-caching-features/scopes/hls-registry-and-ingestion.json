@@ -1,15 +1,17 @@
 {
   "scope_id": "hls-registry-and-ingestion",
   "topology_type": "ICEBERG",
-  "business_goal": "An HLS playlist and its segments register as ONE asset with a real, registry-native byte total; the registry is version-tagged (a pre-v2 registry is discarded wholesale and its orphans swept once); eviction removes the whole asset atomically without ever rescanning disk; every playlist/segment request always terminates with a response (R2/R3/R6/R9/R10, A2/A3, UC-IngestHlsPlaylist + UC-IngestHlsSegment + UC-EvictCacheAsset, breadboard slices V2+V3).",
+  "business_goal": "An HLS playlist and its segments register as ONE asset with a real, registry-native byte total; the registry is version-tagged (a pre-v2 registry is discarded wholesale and its orphans swept once); eviction removes the whole asset atomically without ever rescanning disk; every playlist/segment request always terminates with a response, exactly once, with an intact body (R2/R3/R6/R9/R10, A2/A3, UC-IngestHlsPlaylist + UC-IngestHlsSegment + UC-EvictCacheAsset, breadboard slices V2+V3). Extended in the round-4 device-smoke remap (2026-07-26) to own the request/response transport seam itself: BridgeServer.listen's httpServerResponseReceived dispatch (BUG-7 duplicate-listener double-dispatch) and HttpProxy.respond's error-body encoding (BUG-8 base64-mangled plain-text error bodies for WRITE_FAILED/ORIGIN_UNREACHABLE_NO_CACHE/SEGMENT_WRITE_FAILED/Bad Request) are both load-bearing for this same 'every request always terminates with a response' guarantee — ProxyCacheManager.ts (already this scope's substrate) is httpProxy.ts's sole production caller (`new BridgeServer(...)`, `this._bridgeServer.listen(...)`), and every error body BUG-8 corrupts is one this scope's own handlers (`reverseRes.send`) already emit.",
   "tasks": ["TASK-004", "TASK-007", "TASK-008", "TASK-009", "TASK-016"],
   "allowed_file_substrate": [
     "src/ProxyCacheManager.ts",
     "src/Provider/MemoryCacheProvider.ts",
     "src/Provider/MemoryCacheLFUSizePolicy.ts",
     "src/Libs/fileSystem.ts",
+    "src/Libs/httpProxy.ts",
     "src/__tests__/registry-eviction*.test.*",
-    "src/__tests__/hls-ingest*.test.*"
+    "src/__tests__/hls-ingest*.test.*",
+    "src/__tests__/http-proxy*.test.*"
   ],
   "shared_substrate": [
     "src/ProxyCacheManager.ts",
@@ -17,8 +19,11 @@
   ],
   "affordance_manifest": [],
   "e2e_verification_fixtures": [
-    "yarn test --testPathPattern 'registry-eviction|hls-ingest'",
+    "yarn test --testPathPattern 'registry-eviction|hls-ingest|http-proxy'",
     "yarn typecheck"
+  ],
+  "manual_checks": [
+    "TBD(regression test): src/__tests__/http-proxy*.test.* did not exist before the round-4 remap — BUG-7 (duplicate httpServerResponseReceived listener dedupe across repeated listen()/stop() cycles) and BUG-8 (respond's base64 body decoding must preserve plain-text error bodies byte-for-byte) both need a new fixture written against DeviceEventEmitter/HttpProxy.respond directly, not invented here — flagged so t0 does not go blind on an unbuilt file glob."
   ],
   "hill_phase": "UPHILL_UNKNOWN"
 }
