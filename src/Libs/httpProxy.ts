@@ -6,7 +6,7 @@ import type {
   ResponseInterface,
 } from '../types/type';
 // Contract source of truth for the native seam (result-bearing start):
-// docs/shapeup-sdlc/fix-core-caching-bugs/spec/contracts/native-start.contract.md
+// shapeup/fix-core-caching-bugs/spec/contracts/native-start.contract.md
 import type { Spec as HttpServerSpec } from '../NativeCacheVideoHttpProxy';
 import { MAX_PORT, MIN_PORT } from '../Utils/constants';
 

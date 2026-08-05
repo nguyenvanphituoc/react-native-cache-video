@@ -10,7 +10,7 @@ import { getExtensionIfNeed, hashFileName, isNull } from './util';
 //   - `resourceURL.pathname` ALONE (never the host) was hashed for the disk
 //     file path, a confirmed cross-origin path-collision risk (util.ts:179,
 //     code-surface.md N2).
-// See docs/shapeup-sdlc/hls-caching-features/spec/usecases/UC-NormalizeCacheKey.md.
+// See shapeup/hls-caching-features/spec/usecases/UC-NormalizeCacheKey.md.
 
 export interface CacheKeyPolicyOptions {
   /** Query param names stripped before hashing (case-insensitive). Defaults

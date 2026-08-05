@@ -10,7 +10,7 @@
 // (round-ledger D4): the proxy handlers (TASK-007/008) call writeTemp/
 // verifyAndPromote instead of writing direct-to-final.
 //
-// See docs/shapeup-sdlc/hls-caching-features/spec/contracts/cache-file-store.contract.md.
+// See shapeup/hls-caching-features/spec/contracts/cache-file-store.contract.md.
 
 import type { SessionTaskInterface } from '../types/type';
 import {

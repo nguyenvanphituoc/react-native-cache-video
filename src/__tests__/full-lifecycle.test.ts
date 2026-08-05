@@ -13,7 +13,7 @@
  * these pass (test-only substrate).
  *
  * Two round-ledger decisions this suite is the mandatory verification point
- * for (docs/shapeup-sdlc/hls-caching-features/round-ledger.md):
+ * for (shapeup/hls-caching-features/round-ledger.md):
  *
  *  - D7: `CacheManager.setActiveWindow` is a thin forwarder onto
  *    `PreCacheProvider.prefetchWindow.setActiveWindow`. "Window prefetch

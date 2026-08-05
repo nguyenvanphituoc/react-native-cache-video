@@ -15,7 +15,7 @@
 // (round-ledger D4): retain/release/isEvictable/checkPromote/bumpGeneration
 // are the primitives that scope's TASK-007/008/009 consult once wired.
 //
-// See docs/shapeup-sdlc/hls-caching-features/spec/usecases/UC-PinAndReleaseAsset.md.
+// See shapeup/hls-caching-features/spec/usecases/UC-PinAndReleaseAsset.md.
 
 const pinCount = new Map<string, number>();
 const generation = new Map<string, number>();

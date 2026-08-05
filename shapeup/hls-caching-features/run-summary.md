@@ -39,7 +39,7 @@ All four README items delivered, each traceable pitch → breadboard → scope �
 
 ## Traceability
 
-- Spec: `docs/shapeup-sdlc/hls-caching-features/spec/` (9 UCs, 3 contracts) · Scopes: `scopes/*.json` (7)
+- Spec: `shapeup/hls-caching-features/spec/` (9 UCs, 3 contracts) · Scopes: `scopes/*.json` (7)
 - Decisions: `round-ledger.md` D1–D7 · Hill: `hill/hill-chart.md` (all T1 PASS, FINISHED on merge)
 - Eval: `.shapeup-sdlc/hls-caching-features/evaluation/EVAL-FEATURE-hls-caching-features.md` (r3 PASS)
-- QA: `.shapeup-sdlc/hls-caching-features/qa/hunt-report.md` · Metrics row: `docs/shapeup-sdlc/metrics/teo-local.jsonl`
+- QA: `.shapeup-sdlc/hls-caching-features/qa/hunt-report.md` · Metrics row: `shapeup/metrics/teo-local.jsonl`

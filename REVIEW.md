@@ -32,7 +32,7 @@ Android (Kotlin) with old-arch and new-arch (TurboModule) support.
 - Formatting/lint issues (CI runs eslint + prettier; lefthook enforces locally)
 - Generated/compiled output: `lib/`, `plugin/build/`, `android/build/`, codegen artifacts
 - Lockfiles, `docs/**`, `*.md` content style
-- Pre-existing warnings explicitly tracked in `docs/shapeup-sdlc/*/round-ledger.md` or
+- Pre-existing warnings explicitly tracked in `shapeup/*/round-ledger.md` or
   the discovery ledger
 
 ## Context worth knowing

@@ -88,3 +88,6 @@ lib/
 
 # shapeup harness local run-trace (ephemeral)
 .shapeup-sdlc/
+
+# Shape Up SDLC run workspace (ADR-0001 rename; both roots kept during migration)
+.shapeup/

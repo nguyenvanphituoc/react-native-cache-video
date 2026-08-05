@@ -12,7 +12,7 @@ skill_version: "4.0"
 
 # Pitch Digest: HLS Caching Features
 
-> Source pitch: `docs/shapeup-sdlc/hls-caching-features/shaping/shaping.md` (+ breadboard).
+> Source pitch: `shapeup/hls-caching-features/shaping/shaping.md` (+ breadboard).
 > Orient artifacts consumed: `.shapeup-sdlc/hls-caching-features/orient/` (code-surface,
 > discovered-seed, hill-signal, spike-registry-v2-eviction [RESOLVED]).
 

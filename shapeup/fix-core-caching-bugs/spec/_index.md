@@ -12,7 +12,7 @@ skill_version: "4.0"
 
 # Pitch Digest: Fix Core Caching Bugs
 
-> Source pitch: `docs/shapeup-sdlc/fix-core-caching-bugs/shaping/shaping.md` (+ breadboard.md).
+> Source pitch: `shapeup/fix-core-caching-bugs/shaping/shaping.md` (+ breadboard.md).
 > Orient artifacts consumed: `.shapeup-sdlc/fix-core-caching-bugs/orient/` (code-surface,
 > spike-turbomodule-start-result [RESOLVED], discovered-seed, hill-signal).
 
