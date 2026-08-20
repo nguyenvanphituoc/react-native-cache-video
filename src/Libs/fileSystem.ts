@@ -137,7 +137,23 @@ export class FileSystemManager {
   // Atomic promote: `fs.mv` is a rename when source and destination share a
   // directory — unlike `copyfile` (cp + unlink), a crash mid-call can never
   // leave a half-written file at the destination.
+  //
+  // BUG-6 (device smoke, 2026-07-26): on real iOS, `fs.mv` FAILS when
+  // `toPath` already exists — any re-ingest of an already-cached
+  // playlist/segment/asset (e.g. a second playback session) hits this on
+  // every promote and the whole session 500s. Callers that need
+  // eviction-safety (verifyAndPromote's generation check) already gate the
+  // call to moveFile on that check BEFORE ever reaching here, so by the
+  // time we get here this promote is authorized to replace whatever is at
+  // `toPath` — clear it first (a missing destination, the common first-
+  // promote case, is not an error) so the rename can proceed.
   async moveFile(fromPath: string, toPath: string): Promise<void> {
+    try {
+      await FSManager.unlink(toPath);
+    } catch (error) {
+      // destination didn't exist — expected on the common (first-promote)
+      // path, not an error.
+    }
     await FSManager.mv(fromPath, toPath);
   }
 
@@ -161,6 +177,38 @@ export class FileSystemManager {
       return lstat;
     }
     return [] as Awaited<ReturnType<typeof FSManager.lstat>>;
+  }
+
+  // TASK-004 (AssetRegistryRepository#sweepOrphans): one-time, PREFIX-SCOPED
+  // sweep of everything under `cachePrefix` — RH5 explicitly rules out a
+  // full-disk scan, so this only ever lists the single cache bucket folder
+  // (never recurses above it). Called exactly once, right after a v1
+  // (untagged) registry is discarded, when the fresh v2 registry is still
+  // empty — so every file found here has no v2 entry to answer for by
+  // construction; a per-file unlink failure (already gone) is swallowed, not
+  // an error (contract: "ignored, continues sweeping remaining candidates").
+  async sweepOrphans(
+    cachePrefix: string
+  ): Promise<{ swept: string[]; bytesReclaimed: number }> {
+    const files = await this.getStatisticList(cachePrefix);
+    const swept: string[] = [];
+    let bytesReclaimed = 0;
+
+    for (const file of files) {
+      if (file.type !== 'file') {
+        continue;
+      }
+      const size = parseInt(file.size as unknown as string, 10) || 0;
+      try {
+        await this.unlinkFile(file.path);
+        swept.push(file.path);
+        bytesReclaimed += size;
+      } catch (error) {
+        // already gone — not an error, keep sweeping the rest
+      }
+    }
+
+    return { swept, bytesReclaimed };
   }
 
   async existsFile(forFile: string): Promise<boolean> {

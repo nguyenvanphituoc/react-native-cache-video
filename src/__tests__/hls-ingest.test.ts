@@ -1,0 +1,665 @@
+/**
+ * TASK-016 — regression suite for UC-IngestHlsPlaylist (TASK-007) and
+ * UC-IngestHlsSegment (TASK-008): verified-ish write, v2 registry
+ * registration under `__hls_owner`, offline fallback, always-respond.
+ *
+ * `addPlaylistHandler`/`addSegmentHandler` are invoked directly (same
+ * private-access convention as verified-cache-writes.test.ts /
+ * serve-guard.test.ts — `(manager as any)`), with a hand-rolled
+ * ResponseInterface double, rather than driving the full native bridge —
+ * this is what the UCs' own Test Surface calls "force every internal
+ * branch via mocks".
+ *
+ * UNBLOCKED (round-ledger D4, r1-a2): TASK-006 (verified writeTemp/
+ * verifyAndPromote, pin-generation-guard scope substrate) has landed. Both
+ * handlers now write to a TEMP path first (`tempCachePathFor`) and promote
+ * atomically via `CacheFileRepository.verifyAndPromote` — segments use
+ * `writeTemp`'s native direct-to-disk download literally (no transform
+ * needed); the playlist body still fetches in-memory (its URL-rewrite
+ * transform has no writeTemp hook) but is temp-written + verified +
+ * promoted the same way. Segment fetch mocks below carry an explicit
+ * `Content-Length` header matching the fetched payload's own length so
+ * verifyAndPromote's size check (`stat(tempPath).size === contentLength`)
+ * passes under this repo's jest mock (whose `stat().size` is the raw
+ * stored-string length, not a base64-decoded byte count).
+ */
+import { CacheManager, CACHE_STATUS_EVENT } from '../ProxyCacheManager';
+import { FreePolicy } from '../Provider/MemoryCacheFreePolicy';
+import { KEY_PREFIX } from '../Utils/constants';
+import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
+import { tempCachePathFor } from '../Libs/fileSystem';
+import { recordEvents, resetTestHarness } from '../__mock__/harness';
+import BlobUtilMock from '../__mock__/react-native-blob-util';
+
+const PORT = 51234;
+const PLAYLIST_URL = 'https://cdn.example.com/videos/stream/index.m3u8';
+const SEGMENT_URL = 'https://cdn.example.com/videos/stream/seg0.ts';
+const SEGMENT_URL_2 = 'https://cdn.example.com/videos/stream/seg1.ts';
+const SEGMENT_URL_3 = 'https://cdn.example.com/videos/stream/seg2.ts';
+
+const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
+
+const SAMPLE_PLAYLIST = [
+  '#EXTM3U',
+  '#EXT-X-VERSION:3',
+  '#EXTINF:10.0,',
+  'seg0.ts',
+  '#EXTINF:10.0,',
+  'seg1.ts',
+  '#EXT-X-ENDLIST',
+].join('\n');
+
+// minimal ResponseInterface double — records every send/json/html call and
+// flips `closed`, matching the real Response class's contract.
+function mockResponse() {
+  const calls: Array<{ method: string; code: number; body?: string }> = [];
+  return {
+    requestId: 'test-request',
+    closed: false,
+    send(code: number, _type: string, body: string) {
+      this.closed = true;
+      calls.push({ method: 'send', code, body });
+    },
+    sendRaw(code: number, _type: string, base64Body: string) {
+      // already base64 — recorded verbatim, never encoded a second time
+      this.closed = true;
+      calls.push({ method: 'sendRaw', code, body: base64Body });
+    },
+    json(obj: any, code = 200) {
+      this.closed = true;
+      calls.push({ method: 'json', code, body: JSON.stringify(obj) });
+    },
+    html(html: string, code = 200) {
+      this.closed = true;
+      calls.push({ method: 'html', code, body: html });
+    },
+    calls,
+  };
+}
+
+// `addSegmentHandler` fires `systemStorage.readStream(path, callback)`
+// without awaiting it (pre-existing shape, unchanged by this task) — the
+// actual response send happens a few microtask/macrotask hops later, off
+// the promise `addSegmentHandler` itself returns. Tests poll for the
+// response instead of assuming it lands synchronously after the await.
+async function waitForResponse(res: { calls: unknown[] }, maxTicks = 25) {
+  for (let i = 0; i < maxTicks && res.calls.length === 0; i++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
+// setTimeout-based poll for anything driven off a manually-stalled fetch
+// promise (BUG-1 regression below needs to observe the in-flight dataTask
+// call before racing removeCachedVideo against it).
+async function waitFor(
+  predicate: () => boolean,
+  maxWaitMs = 5000,
+  stepMs = 5
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate() && Date.now() - start < maxWaitMs) {
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+}
+
+async function newReadyManager(name: string) {
+  const manager = new CacheManager(name, true);
+  manager.enableMemoryCache(new FreePolicy());
+  await manager.enableBridgeServer(PORT);
+  return manager;
+}
+
+const playlistFilePath = (manager: CacheManager, url: string) =>
+  CacheKeyPolicy.filePathFor(url, manager.cacheFolder, KEY_PREFIX);
+
+describe('UC-IngestHlsPlaylist — Test Surface (TASK-007)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+  });
+
+  it('TS-INV-01: no playlistPath registered for the key while the fetch is in flight', async () => {
+    const manager = await newReadyManager('hls-ingest-inv01');
+    const key = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+    const filePath = playlistFilePath(manager, PLAYLIST_URL);
+    const res = mockResponse();
+
+    let resolveFetch: (v: any) => void = () => {};
+    (manager as any)._sessionTask.dataTask = jest.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    const pending = (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      filePath,
+      {},
+      res
+    );
+
+    expect(manager.memoryCache?.has(key)).toBe(false);
+
+    resolveFetch({
+      data: b64(SAMPLE_PLAYLIST),
+      respInfo: { status: 200, headers: {} },
+    });
+    await pending;
+
+    expect(manager.memoryCache?.has(key)).toBe(true);
+  });
+
+  it('TS-INV-03 / offline fallback: origin unreachable + a previously cached playlist exists → 200 STALE-FALLBACK', async () => {
+    const manager = await newReadyManager('hls-ingest-inv03');
+    const key = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+    const filePath = playlistFilePath(manager, PLAYLIST_URL);
+    const statusEvents = recordEvents(CACHE_STATUS_EVENT);
+
+    BlobUtilMock.__setFetchResponse({
+      data: b64(SAMPLE_PLAYLIST),
+      headers: { 'Content-Length': String(SAMPLE_PLAYLIST.length) },
+    });
+    const first = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      filePath,
+      {},
+      first
+    );
+    expect(first.calls[0]?.code).toBe(200);
+    // the body actually written/served is the REWRITTEN playlist (segment
+    // URIs rewritten to the local proxy by reverseProxyPlaylist) — the
+    // fallback below must serve exactly what was cached, byte for byte.
+    const cachedBody = first.calls[0]?.body;
+
+    // origin now unreachable for a refresh of the SAME playlist
+    BlobUtilMock.__setFetchError(new Error('origin unreachable'));
+    const second = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      filePath,
+      {},
+      second
+    );
+
+    expect(second.calls).toHaveLength(1);
+    expect(second.calls[0]?.code).toBe(200);
+    expect(second.calls[0]?.body).toBe(cachedBody);
+    expect(statusEvents.events).toContainEqual({
+      key,
+      status: 'STALE-FALLBACK',
+    });
+    statusEvents.stop();
+  });
+
+  it('BUG-4 fix (r3-a2): a PREFETCH-ONLY asset (playlist file holds RAW origin text, never run through addPlaylistHandler — the exact shape PrefetchWindow.registerPrefetchedPlaylist leaves on disk) still gets a proxy-rewritten STALE-FALLBACK body, not raw origin text', async () => {
+    const manager = await newReadyManager('hls-ingest-bug4-prefetch-only');
+    const key = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+    const filePath = playlistFilePath(manager, PLAYLIST_URL);
+
+    // Simulate what a prefetch-only ingest leaves behind: the RAW,
+    // un-rewritten origin playlist text written straight to the FINAL path
+    // (no rewrite ever applied), and an `hls` owner entry registered for it
+    // — `addPlaylistHandler` is never called for this asset before the
+    // fallback below, matching a real player's very FIRST request for an
+    // asset that was only ever prefetched.
+    BlobUtilMock.__seedFile(filePath, SAMPLE_PLAYLIST);
+    (manager.memoryCache as any)?.put(key, {
+      kind: 'hls',
+      playlistPath: filePath,
+      segmentPaths: [],
+      bytes: SAMPLE_PLAYLIST.length,
+      generation: 0,
+      pinCount: 0,
+    });
+
+    // origin is down for this asset's first real playback request
+    BlobUtilMock.__setFetchError(new Error('origin unreachable'));
+    const res = mockResponse();
+    await (manager as any).addPlaylistHandler(PLAYLIST_URL, filePath, {}, res);
+
+    expect(res.calls).toHaveLength(1);
+    expect(res.calls[0]?.code).toBe(200);
+
+    const Buffer = require('buffer').Buffer;
+    const decodedFallbackBody = Buffer.from(
+      res.calls[0]?.body ?? '',
+      'base64'
+    ).toString('utf8');
+
+    // segment lines are proxy-rewritten (127.0.0.1:<current port>, carrying
+    // __hls_origin_url) — NOT the bare origin-relative `seg0.ts`/`seg1.ts`
+    // lines SAMPLE_PLAYLIST itself contains.
+    expect(decodedFallbackBody).toContain(`127.0.0.1:${PORT}`);
+    expect(decodedFallbackBody).toContain('__hls_origin_url');
+    const segmentLines = decodedFallbackBody
+      .split('\n')
+      .filter((line: string) => line.length > 0 && !line.startsWith('#'));
+    expect(segmentLines.length).toBeGreaterThan(0);
+    for (const line of segmentLines) {
+      expect(line.startsWith(`http://127.0.0.1:${PORT}`)).toBe(true);
+      expect(line).not.toBe('seg0.ts');
+      expect(line).not.toBe('seg1.ts');
+    }
+  });
+
+  it('TS-INV-04: every internal branch (success, origin failure w/ and w/o cache) always sends exactly one response', async () => {
+    const manager = await newReadyManager('hls-ingest-inv04');
+
+    // success
+    BlobUtilMock.__setFetchResponse({
+      data: b64(SAMPLE_PLAYLIST),
+      headers: {},
+    });
+    const successRes = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      playlistFilePath(manager, PLAYLIST_URL),
+      {},
+      successRes
+    );
+    expect(successRes.calls).toHaveLength(1);
+
+    // origin failure, no cache for a DIFFERENT key
+    const otherUrl = 'https://cdn.example.com/videos/other/index.m3u8';
+    BlobUtilMock.__setFetchError(new Error('network down'));
+    const noCacheRes = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      otherUrl,
+      playlistFilePath(manager, otherUrl),
+      {},
+      noCacheRes
+    );
+    expect(noCacheRes.calls).toHaveLength(1);
+    expect(noCacheRes.calls[0]?.code).toBe(502);
+
+    // origin failure WITH a cached playlist (the first key, already verified above)
+    const fallbackRes = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      playlistFilePath(manager, PLAYLIST_URL),
+      {},
+      fallbackRes
+    );
+    expect(fallbackRes.calls).toHaveLength(1);
+    expect(fallbackRes.calls[0]?.code).toBe(200);
+  });
+
+  it('TS-ERR-ORIGIN_UNREACHABLE_NO_CACHE: origin fails, no prior cache → 502, response sent', async () => {
+    const manager = await newReadyManager('hls-ingest-err-nocache');
+    BlobUtilMock.__setFetchError(new Error('boom'));
+    const res = mockResponse();
+
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      playlistFilePath(manager, PLAYLIST_URL),
+      {},
+      res
+    );
+
+    expect(res.calls).toEqual([
+      { method: 'send', code: 502, body: 'ORIGIN_UNREACHABLE_NO_CACHE' },
+    ]);
+  });
+
+  it('TS-ERR-WRITE_FAILED: verified write of the playlist body fails → 500, response sent', async () => {
+    const manager = await newReadyManager('hls-ingest-err-write');
+    BlobUtilMock.__setFetchResponse({
+      data: b64(SAMPLE_PLAYLIST),
+      headers: {},
+    });
+    BlobUtilMock.fs.writeFile.mockRejectedValueOnce(new Error('disk full'));
+    const res = mockResponse();
+
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      playlistFilePath(manager, PLAYLIST_URL),
+      {},
+      res
+    );
+
+    expect(res.calls).toEqual([
+      { method: 'send', code: 500, body: 'WRITE_FAILED' },
+    ]);
+  });
+
+  it('TS-REQ-originUrl-missing: empty originUrl handled via the fail-safe key — no crash, a response is still sent', async () => {
+    const manager = await newReadyManager('hls-ingest-req-missing');
+    BlobUtilMock.__setFetchError(new Error('n/a'));
+    const res = mockResponse();
+
+    await expect(
+      (manager as any).addPlaylistHandler('', '', {}, res)
+    ).resolves.not.toThrow();
+    expect(res.calls).toHaveLength(1);
+  });
+
+  it('registers a CacheAsset{kind:"hls"} owner entry with playlistPath set on success (integration flow)', async () => {
+    const manager = await newReadyManager('hls-ingest-registers-owner');
+    const key = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+    const filePath = playlistFilePath(manager, PLAYLIST_URL);
+    BlobUtilMock.__setFetchResponse({
+      data: b64(SAMPLE_PLAYLIST),
+      headers: {},
+    });
+    const res = mockResponse();
+
+    await (manager as any).addPlaylistHandler(PLAYLIST_URL, filePath, {}, res);
+
+    const entry = manager.memoryCache?.get(key) as any;
+    expect(entry.kind).toBe('hls');
+    expect(entry.playlistPath).toBe(filePath);
+    expect(entry.segmentPaths).toEqual([]);
+    expect(BlobUtilMock.__hasFile(filePath)).toBe(true);
+  });
+});
+
+describe('UC-IngestHlsSegment — Test Surface (TASK-008)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+  });
+
+  async function ingestPlaylist(manager: CacheManager) {
+    BlobUtilMock.__setFetchResponse({
+      data: b64(SAMPLE_PLAYLIST),
+      headers: {},
+    });
+    const res = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST_URL,
+      playlistFilePath(manager, PLAYLIST_URL),
+      {},
+      res
+    );
+    return CacheKeyPolicy.keyFor(PLAYLIST_URL);
+  }
+
+  const segmentFilePath = (manager: CacheManager, url: string) =>
+    CacheKeyPolicy.filePathFor(url, manager.cacheFolder, KEY_PREFIX);
+
+  it('TS-ERR-OWNER_ASSET_MISSING: segment requested before its playlist was ever ingested → 404, response sent, no crash', async () => {
+    const manager = await newReadyManager('hls-segment-owner-missing');
+    const res = mockResponse();
+
+    await (manager as any).addSegmentHandler(
+      SEGMENT_URL,
+      segmentFilePath(manager, SEGMENT_URL),
+      {},
+      res
+    );
+    await waitForResponse(res);
+
+    expect(res.calls).toEqual([
+      { method: 'send', code: 404, body: 'OWNER_ASSET_MISSING' },
+    ]);
+  });
+
+  it('TS-ERR-SEGMENT_WRITE_FAILED: origin fetch fails for a segment → 500, not added to segmentPaths, response sent', async () => {
+    const manager = await newReadyManager('hls-segment-write-failed');
+    const ownerKey = await ingestPlaylist(manager);
+    BlobUtilMock.__setFetchError(new Error('segment fetch failed'));
+    const res = mockResponse();
+
+    await (manager as any).addSegmentHandler(
+      SEGMENT_URL,
+      segmentFilePath(manager, SEGMENT_URL),
+      {},
+      res
+    );
+    await waitForResponse(res);
+
+    expect(res.calls).toEqual([
+      { method: 'send', code: 500, body: 'SEGMENT_WRITE_FAILED' },
+    ]);
+    const owner = manager.memoryCache?.get(ownerKey) as any;
+    expect(owner.segmentPaths).toEqual([]);
+  });
+
+  it('TS-INV-02 / boundary: three segments accumulate under one owner; a repeat request does NOT double-count bytes', async () => {
+    const manager = await newReadyManager('hls-segment-accumulate');
+    const ownerKey = await ingestPlaylist(manager);
+    // baseline: registerHlsOwner seeds `bytes` with the playlist's own size
+    // on creation — segment bytes accumulate ON TOP of that, not from zero.
+    const playlistBytes = (manager.memoryCache?.get(ownerKey) as any).bytes;
+
+    const segments = [SEGMENT_URL, SEGMENT_URL_2, SEGMENT_URL_3];
+    const payloads = ['seg-zero-bytes', 'seg-one-bytes-x', 'seg-two-bytes-xy'];
+
+    for (let i = 0; i < segments.length; i++) {
+      // TASK-008: writeTemp/verifyAndPromote verify the temp file's size
+      // against the origin's declared Content-Length before promoting —
+      // must match what actually lands on disk (the raw fetched string).
+      BlobUtilMock.__setFetchResponse({
+        data: b64(payloads[i]!),
+        headers: { 'Content-Length': String(b64(payloads[i]!).length) },
+      });
+      const res = mockResponse();
+      await (manager as any).addSegmentHandler(
+        segments[i],
+        segmentFilePath(manager, segments[i]!),
+        {},
+        res
+      );
+      await waitForResponse(res);
+      expect(res.calls[0]?.code).toBe(200);
+    }
+
+    const owner = manager.memoryCache?.get(ownerKey) as any;
+    expect(owner.segmentPaths).toHaveLength(3);
+    const expectedSegmentBytes = payloads.reduce(
+      (sum, p) => sum + Buffer.byteLength(b64(p), 'base64'),
+      0
+    );
+    const expectedBytes = playlistBytes + expectedSegmentBytes;
+    expect(owner.bytes).toBe(expectedBytes);
+
+    // repeat request for the FIRST segment — already on disk, served from
+    // cache, no re-registration
+    const repeatRes = mockResponse();
+    await (manager as any).addSegmentHandler(
+      segments[0],
+      segmentFilePath(manager, segments[0]!),
+      {},
+      repeatRes
+    );
+    await waitForResponse(repeatRes);
+    expect(repeatRes.calls[0]?.code).toBe(200);
+
+    const ownerAfterRepeat = manager.memoryCache?.get(ownerKey) as any;
+    expect(ownerAfterRepeat.segmentPaths).toHaveLength(3); // unchanged
+    expect(ownerAfterRepeat.bytes).toBe(expectedBytes); // unchanged — no double count
+  });
+
+  it('TS-INV-03: success, discard (write-fail), and owner-missing branches each call the response exactly once', async () => {
+    const manager = await newReadyManager('hls-segment-inv03');
+    const ownerKey = await ingestPlaylist(manager);
+    expect(manager.memoryCache?.has(ownerKey)).toBe(true);
+
+    // success
+    BlobUtilMock.__setFetchResponse({
+      data: b64('bytes'),
+      headers: { 'Content-Length': String(b64('bytes').length) },
+    });
+    const successRes = mockResponse();
+    await (manager as any).addSegmentHandler(
+      SEGMENT_URL,
+      segmentFilePath(manager, SEGMENT_URL),
+      {},
+      successRes
+    );
+    await waitForResponse(successRes);
+    expect(successRes.calls).toHaveLength(1);
+
+    // discard: origin fails for a NEW segment
+    BlobUtilMock.__setFetchError(new Error('down'));
+    const discardRes = mockResponse();
+    await (manager as any).addSegmentHandler(
+      SEGMENT_URL_2,
+      segmentFilePath(manager, SEGMENT_URL_2),
+      {},
+      discardRes
+    );
+    await waitForResponse(discardRes);
+    expect(discardRes.calls).toHaveLength(1);
+
+    // owner missing: a brand-new manager with no playlist ever ingested
+    const bareManager = await newReadyManager('hls-segment-inv03-bare');
+    const missingRes = mockResponse();
+    await (bareManager as any).addSegmentHandler(
+      SEGMENT_URL,
+      segmentFilePath(bareManager, SEGMENT_URL),
+      {},
+      missingRes
+    );
+    await waitForResponse(missingRes);
+    expect(missingRes.calls).toHaveLength(1);
+  });
+
+  it('registers the segment under the owner asset (integration flow: playlist → segment)', async () => {
+    const manager = await newReadyManager('hls-segment-integration');
+    const ownerKey = await ingestPlaylist(manager);
+    BlobUtilMock.__setFetchResponse({
+      data: b64('segment-bytes'),
+      headers: { 'Content-Length': String(b64('segment-bytes').length) },
+    });
+    const res = mockResponse();
+
+    await (manager as any).addSegmentHandler(
+      SEGMENT_URL,
+      segmentFilePath(manager, SEGMENT_URL),
+      {},
+      res
+    );
+    await waitForResponse(res);
+
+    expect(res.calls[0]?.code).toBe(200);
+    const owner = manager.memoryCache?.get(ownerKey) as any;
+    expect(owner.segmentPaths).toEqual([segmentFilePath(manager, SEGMENT_URL)]);
+    expect(owner.bytes).toBeGreaterThan(0);
+  });
+
+  // r2-a1 regression — BUG-1 (SC-AC-04/SC-AC-06/DW-4): a segment's
+  // generation guard must observe the OWNER's live generation, not a
+  // segment-local one that is never bumped anywhere. Mirrors the r1
+  // discovery scenario (full-lifecycle.test.ts's now-superseded "addSegment
+  // Handler's generation guard is keyed by the SEGMENT" test) but asserts
+  // the FIXED outcome from inside this scope's own substrate.
+  it('BUG-1 fix: a segment write still in flight when its owner is removed mid-download does NOT resurrect the file on disk (no-resurrection, R4)', async () => {
+    const manager = await newReadyManager('hls-segment-bug1-fix');
+    const PLAYLIST = 'https://cdn.example.com/videos/bug1-fix/index.m3u8';
+    const SEGMENT = 'https://cdn.example.com/videos/bug1-fix/seg0.ts';
+    const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST);
+    const segPath = segmentFilePath(manager, SEGMENT);
+
+    BlobUtilMock.__setFetchResponse({
+      data: b64(SAMPLE_PLAYLIST),
+      headers: {},
+    });
+    const pRes = mockResponse();
+    await (manager as any).addPlaylistHandler(
+      PLAYLIST,
+      playlistFilePath(manager, PLAYLIST),
+      {},
+      pRes
+    );
+    expect(manager.memoryCache?.has(ownerKey)).toBe(true);
+
+    // stall the segment's origin fetch so removeCachedVideo can race it
+    const originalDataTask = (manager as any)._sessionTask.dataTask.bind(
+      (manager as any)._sessionTask
+    );
+    let resolveSegmentFetch: (v: any) => void = () => {};
+    (manager as any)._sessionTask.dataTask = jest.fn(
+      (url: string, options: any, callback?: any) => {
+        if (url === SEGMENT) {
+          return new Promise((resolve) => {
+            resolveSegmentFetch = resolve;
+          });
+        }
+        return originalDataTask(url, options, callback);
+      }
+    );
+
+    const segRes = mockResponse();
+    (manager as any).addSegmentHandler(SEGMENT, segPath, {}, segRes);
+    await waitFor(() =>
+      ((manager as any)._sessionTask.dataTask as jest.Mock).mock.calls.some(
+        ([u]: [string]) => u === SEGMENT
+      )
+    );
+
+    // owner removed WHILE the segment fetch is still in flight — bumps the
+    // owner's generation (the value addSegmentHandler captured BEFORE the
+    // fetch started is now stale).
+    await manager.removeCachedVideo(PLAYLIST);
+    expect(manager.memoryCache?.has(ownerKey)).toBe(false);
+
+    // the fetch "arrives" late with a clean, verifiable body
+    const lateBody = b64('late-segment-bytes');
+    BlobUtilMock.__seedFile(tempCachePathFor(segPath), lateBody);
+    resolveSegmentFetch({
+      respInfo: { headers: { 'Content-Length': String(lateBody.length) } },
+    });
+    await waitForResponse(segRes);
+
+    // FIXED: verifyAndPromote's checkPromote now compares against the
+    // OWNER's live (bumped) generation, so the late promote is discarded —
+    // the file never lands on its final path, and the owner stays absent.
+    expect(BlobUtilMock.__hasFile(segPath)).toBe(false);
+    expect(manager.memoryCache?.has(ownerKey)).toBe(false);
+    // still ends in exactly one defined response (R10) — the discard path
+    // still serves the player its bytes for THIS request.
+    expect(segRes.calls).toHaveLength(1);
+    expect(segRes.calls[0]?.code).toBe(200);
+  });
+
+  // r2-a1 regression — BUG-2 (SC-AC-03/DW-3): a segment served from the
+  // "already on disk" fast path (e.g. a prefetched-but-never-registered
+  // file) must be registered under its owner — bytes + segmentPaths — not
+  // silently served unaccounted.
+  it('BUG-2 fix: a segment already on disk with no prior registration (e.g. prefetched) is registered under the owner on the disk-first fast path', async () => {
+    const manager = await newReadyManager('hls-segment-bug2-fix');
+    const ownerKey = await ingestPlaylist(manager);
+    const bytesBeforeSegment = (manager.memoryCache?.get(ownerKey) as any)
+      .bytes;
+
+    const segPath = segmentFilePath(manager, SEGMENT_URL);
+    // simulate a segment prefetched straight to disk (PrefetchWindow's own
+    // path) WITHOUT ever going through addSegmentHandler's registration —
+    // the exact D6/BUG-2 starting condition.
+    const prefetchedBody = b64('prefetched-bytes-not-registered');
+    BlobUtilMock.__seedFile(segPath, prefetchedBody);
+    expect((manager.memoryCache?.get(ownerKey) as any).segmentPaths).toEqual(
+      []
+    );
+
+    const res = mockResponse();
+    await (manager as any).addSegmentHandler(SEGMENT_URL, segPath, {}, res);
+    await waitForResponse(res);
+
+    expect(res.calls[0]?.code).toBe(200);
+    const owner = manager.memoryCache?.get(ownerKey) as any;
+    expect(owner.segmentPaths).toEqual([segPath]);
+    expect(owner.bytes).toBe(
+      bytesBeforeSegment + Buffer.byteLength(prefetchedBody, 'base64')
+    );
+
+    // boundary: a genuine repeat request afterward must not double-count.
+    const repeatRes = mockResponse();
+    await (manager as any).addSegmentHandler(
+      SEGMENT_URL,
+      segPath,
+      {},
+      repeatRes
+    );
+    await waitForResponse(repeatRes);
+    const ownerAfterRepeat = manager.memoryCache?.get(ownerKey) as any;
+    expect(ownerAfterRepeat.segmentPaths).toEqual([segPath]);
+    expect(ownerAfterRepeat.bytes).toBe(owner.bytes);
+
+    // consequence check: the now-registered segment is no longer an
+    // untracked leak — removing the owner cleans it up.
+    await manager.removeCachedVideo(PLAYLIST_URL);
+    expect(BlobUtilMock.__hasFile(segPath)).toBe(false);
+  });
+});

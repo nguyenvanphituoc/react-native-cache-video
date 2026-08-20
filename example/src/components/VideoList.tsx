@@ -1,5 +1,6 @@
 import React, { useRef } from 'react';
 import { FlatList, Text, Dimensions, View } from 'react-native';
+import { usePrefetch } from 'react-native-cache-video';
 import VideoItem from './VideoItem'; // Assuming VideoItem is in the same directory
 // import { mediaJSON } from '../data/videos';
 import { mediaJSON } from '../data/streams';
@@ -10,6 +11,13 @@ export default function VideoList() {
   const videos = mediaJSON?.categories?.[0]?.videos;
   const videoRefs = useRef<any>([]);
   const currentDisplayIndex = useRef(-1);
+
+  // TASK-014 ([[usecases/UC-UsePrefetchHook]]): additive reference wiring —
+  // the existing onMomentumScrollEnd-derived pageIndex logic below stays
+  // untouched (ux-behavior RULE-02); onViewableItemsChanged/viewabilityConfig
+  // are ADDED to the FlatList so usePrefetch can drive proximity prefetching.
+  const urls = (videos ?? []).map((video) => video.sources?.[0] ?? '');
+  const { onViewableItemsChanged, viewabilityConfig } = usePrefetch(urls);
 
   return (
     <FlatList
@@ -23,6 +31,8 @@ export default function VideoList() {
         offset: dimension.height * index,
         index,
       })}
+      onViewableItemsChanged={onViewableItemsChanged}
+      viewabilityConfig={viewabilityConfig}
       onMomentumScrollEnd={(event) => {
         const pageIndex = Math.round(
           event.nativeEvent.contentOffset.y / dimension.height

@@ -6,8 +6,10 @@ import type {
   SessionTaskInterface,
 } from '../types/type';
 import { KEY_PREFIX, SIGNAL_NOT_DOWNLOAD_ACTION } from '../Utils/constants';
-import { cacheKey, getCacheKey, isHLSUrl, isMediaUrl } from '../Utils/util';
+import { isHLSUrl, isMediaUrl } from '../Utils/util';
+import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
 import { FileSystemManager, tempCachePathFor } from '../Libs/fileSystem';
+import { PrefetchWindow } from './PrefetchWindow';
 
 import type { FetchBlobResponse, StatefulPromise } from '../Libs/session';
 
@@ -62,6 +64,11 @@ export class PreCacheProvider implements PreCacheInterface {
   private errorCachingList: { [key in string]?: string } = {};
   // verify (stat) + promote (mv) + discard (unlink) for the verified write path
   private storage = new FileSystemManager();
+  // TASK-012: the sliding-window prefetch queue + isBusy()-gated serial
+  // runner ([[usecases/UC-SetActiveWindow]], [[usecases/UC-PrefetchHlsAsset]]).
+  // preCacheFor's HLS branch below delegates into the SAME primitive this
+  // instance would use for the window-driven queue, rather than refusing.
+  readonly prefetchWindow: PrefetchWindow;
   //
   delegate?: PreCacheDelegate;
   sessionTask: SessionTaskInterface;
@@ -70,6 +77,17 @@ export class PreCacheProvider implements PreCacheInterface {
   constructor(cacheFolder: string, sessionTask: SessionTaskInterface) {
     this.sessionTask = sessionTask;
     this.cacheFolder = cacheFolder;
+    this.prefetchWindow = new PrefetchWindow(sessionTask, {
+      storage: this.storage,
+      // UC-PrefetchHlsAsset step 4: media items in the window queue reuse
+      // this SAME instance's own (unchanged) mp4 verified-write path.
+      mediaIngestor: (url: string) => this.prepareSourceMedia(url),
+      // BUG-3 fix (r2-a1, round-ledger D6): a LIVE accessor, not a snapshot
+      // — `this.delegate` is assigned by `CacheManager` right after this
+      // constructor returns (ProxyCacheManager.ts:207-208), so reading it
+      // lazily on every prefetch is required, not just defensive.
+      getDelegate: () => this.delegate,
+    });
     //
   }
 
@@ -81,7 +99,9 @@ export class PreCacheProvider implements PreCacheInterface {
   async preCacheForList(urls: string[]) {
     // check cached file exist or not
     const existCache = (url: string) =>
-      this.delegate?.existsFile(cacheKey(url, this.cacheFolder, KEY_PREFIX));
+      this.delegate?.existsFile(
+        CacheKeyPolicy.filePathFor(url, this.cacheFolder, KEY_PREFIX)
+      );
     // filter empty url
     const validUrls = urls.filter((url) => url.length > 0);
     // check cached file exist or not
@@ -165,10 +185,12 @@ export class PreCacheProvider implements PreCacheInterface {
     }
     // detect stream or not
     if (isHLSUrl(url)) {
-      // return this.prepareSourceStream(url);
-      console.warn(
-        'react-native-cache-video does not support pre stream caching'
-      );
+      // TASK-012 (UC-PrefetchHlsAsset): no longer warns-and-refuses —
+      // delegates into the SAME isBusy()-gated serial-runner primitive the
+      // sliding-window prefetch queue drains through (playlist + first N
+      // segments, verified-write per segment). Awaited (not fire-and-forget)
+      // to match this method's existing contract for media urls below.
+      await this.prefetchWindow.prefetchHlsAsset(url);
       return url;
     } else if (isMediaUrl(url)) {
       return this.prepareSourceMedia(url);
@@ -216,8 +238,15 @@ export class PreCacheProvider implements PreCacheInterface {
   // Verified write path (issue #5): download to a TEMP path, verify size
   // against Content-Length, atomically promote temp → final, register LAST.
   // Anything unverified is discarded — the final cache path is never touched.
-  private async prepareSourceMedia(url: string): Promise<string> {
-    const { originURL, cacheKey: finalCachePath } = getCacheKey(
+  // Not `private`: TASK-012's PrefetchWindow (this.prefetchWindow above)
+  // reuses this SAME method as its media-item ingestor (UC-PrefetchHlsAsset
+  // step 4 — "ingest via the existing (unchanged) mp4 verified-write path").
+  async prepareSourceMedia(url: string): Promise<string> {
+    // originURL: the decoded, normalized request target (used for the actual
+    // fetch + in-flight bookkeeping below) — separate from finalCachePath,
+    // which now derives via CacheKeyPolicy (UC-NormalizeCacheKey).
+    const originURL = new URL(decodeURIComponent(url));
+    const finalCachePath = CacheKeyPolicy.filePathFor(
       url,
       this.cacheFolder,
       KEY_PREFIX

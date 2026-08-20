@@ -88,3 +88,10 @@ lib/
 
 # shapeup harness local run-trace (ephemeral)
 .shapeup-sdlc/
+
+# Shape Up SDLC run workspace (ADR-0001 rename; both roots kept during migration)
+.shapeup/
+
+# v2: metrics are per-machine shards under the gitignored LOCAL root (.shapeup/metrics/)
+shapeup/metrics/
+shapeup/metrics.jsonl.migrated

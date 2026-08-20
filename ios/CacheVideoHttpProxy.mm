@@ -140,11 +140,33 @@ RCT_EXPORT_METHOD(stop)
 RCT_EXPORT_METHOD(respond: (NSString *) requestId
                   code: (double) code
                   type: (NSString *) type
-                  body: (NSString *) body)
+                  body: (NSString *) body
+                  headersJson: (NSString *) headersJson)
 {
     NSData* data = [[NSData alloc] initWithBase64EncodedString:body options:NSDataBase64DecodingIgnoreUnknownCharacters];
     GCDWebServerDataResponse* requestResponse = [[GCDWebServerDataResponse alloc] initWithData:data contentType:type];
     requestResponse.statusCode = (NSInteger)code;
+
+    // Additional response headers (0.5.0) — Content-Range/Content-Length for a
+    // 206, and anything else a handler needs to pass through. Parsed
+    // defensively: a malformed or non-object payload is IGNORED rather than
+    // thrown, because the completion block below MUST still run. Dropping a
+    // header degrades the response; failing to complete hangs the request.
+    if (headersJson != nil && headersJson.length > 0) {
+        NSError* jsonError = nil;
+        id parsed = [NSJSONSerialization JSONObjectWithData:[headersJson dataUsingEncoding:NSUTF8StringEncoding]
+                                                    options:0
+                                                      error:&jsonError];
+        if (jsonError == nil && [parsed isKindOfClass:[NSDictionary class]]) {
+            [(NSDictionary*)parsed enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL* stop) {
+                if ([key isKindOfClass:[NSString class]] && [value isKindOfClass:[NSString class]]) {
+                    [requestResponse setValue:(NSString*)value forAdditionalHeader:(NSString*)key];
+                }
+            }];
+        } else {
+            RCTLogWarn(@"respond: ignoring malformed headersJson for request %@", requestId);
+        }
+    }
 
     GCDWebServerCompletionBlock completionBlock = nil;
     @synchronized (self) {

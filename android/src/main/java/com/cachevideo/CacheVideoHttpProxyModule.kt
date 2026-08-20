@@ -51,8 +51,14 @@ class CacheVideoHttpProxyModule(private val reactContext: ReactApplicationContex
   // through verbatim, which is null when the origin serves lowercase header names
   // (HTTP/2). The original Java implementation accepted null silently; a non-null
   // Kotlin parameter turns that into an NPE that tears down the React instance.
-  override fun respond(requestId: String, code: Double, type: String?, body: String?) {
-    server?.respond(requestId, code.toInt(), type, body)
+  override fun respond(
+    requestId: String,
+    code: Double,
+    type: String?,
+    body: String?,
+    headersJson: String?
+  ) {
+    server?.respond(requestId, code.toInt(), type, body, headersJson)
   }
 
   override fun onHostResume() {

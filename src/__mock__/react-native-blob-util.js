@@ -24,6 +24,20 @@ let folders = new Set();
 
 const normalize = (path) => (path.endsWith('/') ? path.slice(0, -1) : path);
 
+// KNOWN FIDELITY GAP (documented, not fixed here).
+// Real react-native-blob-util honours the encoding argument: readFile(p,'base64')
+// and readStream(p,'base64') return base64, and config({path}).fetch writes the
+// DECODED bytes to disk. This mock ignores encoding on both sides and stores the
+// script's `data` verbatim, so the two unfaithfulnesses cancel out and most
+// assertions still hold. They did NOT cancel out for the proxy's response path:
+// because the mock never produced real base64, `send`-encoding an already-base64
+// body was indistinguishable from encoding plain text, and a double-encoding
+// defect that served base64 TEXT to the player passed the whole suite. It was
+// caught by curling the running proxy on a simulator instead.
+// Making reads faithful alone breaks byte-accounting expectations that were
+// calibrated against the write side's matching gap, so this needs fixing on both
+// sides together. Until then, the double-encoding class of bug is covered
+// directly at the Response layer in src/__tests__/http-proxy.test.ts.
 function seedDefaultFolders() {
   folders = new Set(Object.values(dirs));
 }
@@ -79,10 +93,18 @@ const fs = {
 
   mv: jest.fn(async (from, to) => {
     const source = normalize(from);
+    const dest = normalize(to);
     if (!files.has(source)) {
       throw new Error(`mv failed: source '${from}' does not exist`);
     }
-    files.set(normalize(to), files.get(source));
+    // Real react-native-blob-util fs.mv FAILS when the destination already
+    // exists (BUG-6, confirmed on-device) — the mock used to silently
+    // overwrite, which is the fidelity gap that let 244 tests pass over a
+    // real bug. Match real iOS semantics: reject on an existing destination.
+    if (files.has(dest)) {
+      throw new Error(`mv failed: destination '${to}' already exists`);
+    }
+    files.set(dest, files.get(source));
     files.delete(source);
     return true;
   }),

@@ -6,38 +6,14 @@ import {
   QUERY_ORIGIN_PATH,
   VIDEO_EXTENSIONS,
 } from './constants';
+import * as CacheKeyPolicy from './cacheKeyPolicy';
+// TASK-009 (UC-CleanModuleBoundary): isNull/getExtensionIfNeed/hashFileName
+// moved to the leaf module `pathPrimitives.ts` to break the util.ts <->
+// cacheKeyPolicy.ts require cycle. Re-exported below so the public surface
+// (`util.ts` / `src/index.tsx`) stays stable for external callers.
+import { isNull, getExtensionIfNeed, hashFileName } from './pathPrimitives';
 
-//
-export const isNull = (data: any) => {
-  if (data === undefined || data == null || data?.length === 0) {
-    return true;
-  } else if (typeof data === 'string') {
-    data = String(data).trim();
-    return data === '';
-  } else if (typeof data === 'object' && data.constructor === Object) {
-    if (Object.keys(data).length === 0) {
-      return true;
-    }
-  } else if (Array.isArray(data) && data.length === 0) {
-    return true;
-  }
-  return false;
-};
-
-export const getExtensionIfNeed = (
-  fileUrl: string,
-  includeDot: boolean | null = null
-) => {
-  const fileNameIndex = fileUrl.lastIndexOf('/');
-  const extensionLastIndex = fileUrl.lastIndexOf('.') + 1;
-  const dot = includeDot ? '.' : '';
-
-  if (extensionLastIndex > -1 && extensionLastIndex > fileNameIndex) {
-    return dot + fileUrl.substring(extensionLastIndex); // include dot
-  }
-
-  return '';
-};
+export { isNull, getExtensionIfNeed, hashFileName };
 // MD5 - start
 /**
 function md5cycle(x: number[], k: number[]) {
@@ -151,48 +127,19 @@ export function hashFileName(fileName: string) {
 //   return h >>> 0;
 // }
 
-export function hashFileName(fileName: string) {
-  let hash = 0;
-  for (let i = 0; i < fileName.length; i++) {
-    // eslint-disable-next-line no-bitwise
-    hash = (hash << 5) - hash + fileName.charCodeAt(i);
-    // eslint-disable-next-line no-bitwise
-    hash |= 0; // Convert to 32bit integer
-  }
-  return Math.abs(hash).toString(16).toUpperCase();
-  //
-  // const halfLength = Math.floor(fileName.length / 2);
-  // const firstHalf = fileName.slice(0, halfLength);
-  // const secondHalf = fileName.slice(halfLength);
-  // const firstHash = hash32(firstHalf).toString(16).padStart(8, '0');
-  // const secondHash = hash32(secondHalf).toString(16).padStart(8, '0');
-  // return (firstHash + secondHash).toUpperCase();
-}
-
+// TASK-003 (UC-NormalizeCacheKey): retained ONLY as a backward-compatible
+// wrapper — every production call site now derives keys/paths via
+// `CacheKeyPolicy.keyFor`/`filePathFor` directly (src/Utils/cacheKeyPolicy.ts).
+// This used to hash `resourceURL.pathname` ALONE (never the host, a
+// cross-origin collision risk — util.ts:179) and had no try/catch around the
+// URL parse (a raw `%` threw). Both gaps are fixed inside CacheKeyPolicy;
+// this wrapper delegates so no caller derives a key independently.
 export function cacheKey(
   resourceStr: string,
   folder: string,
   prefix: string = ''
 ): string {
-  const resourceURL = new URL(decodeURIComponent(resourceStr));
-  const fileExt = getExtensionIfNeed(resourceURL.href);
-  const hashedFileName = hashFileName(resourceURL.pathname);
-
-  const filePath = `${folder}${
-    isNull(prefix) ? '' : prefix + '-'
-  }${hashedFileName}.${fileExt}`;
-
-  return filePath;
-}
-
-export function getCacheKey(
-  urlStr: string,
-  folder: string,
-  prefix: string = ''
-): { originURL: URL; cacheKey: string } {
-  const decodeUrl = new URL(decodeURIComponent(urlStr));
-  const cacheKeyStr = cacheKey(urlStr, folder, prefix);
-  return { originURL: decodeUrl, cacheKey: cacheKeyStr };
+  return CacheKeyPolicy.filePathFor(resourceStr, folder, prefix);
 }
 
 export function pathReplaceLast(url: string, newPath: string): string {
@@ -239,15 +186,27 @@ export function reverseProxyURL(reqUrl: string, port: number): string {
 }
 
 export function getOriginURL(reqUrl: string, port: number) {
-  const url = new URL(`${LOCALHOST}:${port}` + reqUrl);
-  const encodedURLString = url.searchParams.get(QUERY_ORIGIN_PATH) ?? '';
-  const urlString = decodeURIComponent(encodedURLString);
+  // R1/R10 — TOTAL by contract: returns a string or null, never throws.
+  // Two ways this used to throw, both leaving the proxy's async request
+  // handler with a rejected promise and NO response sent, which hangs the
+  // request until the player times out (measured on an iOS simulator: 8s+,
+  // zero bytes):
+  //   1. `new URL(...)` on a request path the server could not parse.
+  //   2. `decodeURIComponent('%')` -> URIError: URI malformed. This is the
+  //      exact "raw %" case R1 names, and it was still live.
+  try {
+    const url = new URL(`${LOCALHOST}:${port}` + reqUrl);
+    const encodedURLString = url.searchParams.get(QUERY_ORIGIN_PATH) ?? '';
 
-  if (!encodedURLString) {
+    if (!encodedURLString) {
+      return null;
+    }
+
+    return decodeURIComponent(encodedURLString);
+  } catch {
+    // Caller answers 400 — an error the player can act on, unlike a hang.
     return null;
   }
-
-  return urlString;
 }
 
 export function reverseProxyPlaylist(
