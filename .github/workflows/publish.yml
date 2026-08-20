@@ -1,0 +1,77 @@
+name: Publish
+
+# Publishes to npm using OIDC trusted publishing — there is NO npm token
+# anywhere in this repo, and none is needed. The runner mints a short-lived
+# OIDC token that npm exchanges for publish rights, which is why publishing
+# cannot be done from a laptop: the credential only exists inside a workflow
+# run. It also satisfies npm's 2FA requirement without a manual OTP.
+#
+# Requires, and all three must hold or the exchange is rejected:
+#   1. `id-token: write` below (the runner cannot mint a token without it).
+#   2. npm CLI >= 11.5.1 (trusted publishing landed there). `.nvmrc` pins
+#      Node 24, which ships a new enough npm; the step below upgrades
+#      explicitly anyway so a Node bump can never silently drop support.
+#   3. A trusted publisher configured on npmjs.com for this package that names
+#      THIS repository AND THIS workflow filename. If the publisher was
+#      registered against a different filename, either rename this file to
+#      match or update the npm setting — a mismatch fails with a 401 that
+#      looks exactly like a missing token.
+
+on:
+  release:
+    types: [published]
+  # Manual trigger, for a release that was cut before this workflow existed
+  # (v0.5.0) or to retry a failed publish without re-cutting the release.
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag or ref to publish (e.g. v0.5.0)'
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # REQUIRED — OIDC token minting
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # On a release event, publish exactly the tagged commit rather than
+          # whatever main happens to be — they can differ if main moved on.
+          ref: ${{ inputs.ref || github.event.release.tag_name }}
+
+      - name: Setup
+        uses: ./.github/actions/setup
+
+      - name: Ensure npm supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Verify the tag matches package.json
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          REF="${{ inputs.ref || github.event.release.tag_name }}"
+          TAG="${REF#v}"
+          echo "package.json=$PKG  tag=$TAG"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::package.json ($PKG) does not match the tag ($TAG) — refusing to publish a mislabelled version."
+            exit 1
+          fi
+
+      - name: Build the publishable artifact
+        run: yarn prepare
+
+      - name: Publish to npm
+        # No NODE_AUTH_TOKEN / .npmrc — OIDC provides the credential.
+        # --provenance publishes a signed attestation linking the tarball to
+        # this workflow run, which is the point of trusting the repo.
+        run: npm publish --provenance --access public
+
+      - name: Verify what the registry now serves
+        run: |
+          sleep 10
+          npm view react-native-cache-video version
