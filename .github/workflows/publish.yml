@@ -85,9 +85,15 @@ jobs:
 
       - name: Publish to npm
         # No NODE_AUTH_TOKEN / .npmrc — OIDC provides the credential.
-        # --provenance publishes a signed attestation linking the tarball to
-        # this workflow run, which is the point of trusting the repo.
-        run: npm publish --provenance --access public
+        #
+        # --loglevel verbose is deliberate and worth keeping: npm's oidc()
+        # helper NEVER throws. Every failure path returns undefined and logs
+        # only at verbose/silly, so a refused token exchange surfaces as a bare
+        # ENEEDAUTH ("you need to run npm login") with no hint of the real
+        # cause. The `oidc` verbose lines name it exactly — the registry's own
+        # message for a refused exchange, a missing token in the response, or
+        # skipped-for-permissions.
+        run: npm publish --provenance --access public --loglevel verbose
 
       - name: Verify what the registry now serves
         run: |
