@@ -9,12 +9,5 @@
         "repo": "nguyenvanphituoc/shapeup-sdlc-plugin"
       }
     }
-  },
-  "permissions": {
-    "allow": [
-      "Bash(node ${CLAUDE_PLUGIN_ROOT}/skills/tech-lead/scripts/:*)",
-      "Bash(node ${CLAUDE_PLUGIN_ROOT}/skills/ba-pitch-analyzer/scripts/:*)",
-      "Bash(node ${CLAUDE_PLUGIN_ROOT}/skills/spec-evaluator/scripts/:*)"
-    ]
   }
 }
