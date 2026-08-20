@@ -1,7 +1,0 @@
-scope_id: cache-key-identity
-phase: DOWNHILL_EXECUTION
-round: 1
-t0_green_attempt: r1-a1
-t1: PASS (r3)
-seesaw: green
-derived: 2026-07-25 (GATE L2.4, mechanical)
