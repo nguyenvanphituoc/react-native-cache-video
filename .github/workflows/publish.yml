@@ -62,24 +62,6 @@ jobs:
             exit 1
           fi
 
-      - name: Diagnose OIDC availability
-        run: |
-          echo "npm: $(npm --version)"
-          # Presence only — never echo the token itself.
-          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
-            echo "ACTIONS_ID_TOKEN_REQUEST_URL: PRESENT"
-          else
-            echo "ACTIONS_ID_TOKEN_REQUEST_URL: ABSENT  <-- OIDC not available to this job"
-          fi
-          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
-            echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN: PRESENT (len ${#ACTIONS_ID_TOKEN_REQUEST_TOKEN})"
-          else
-            echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN: ABSENT"
-          fi
-          echo "registry: $(npm config get registry)"
-          echo "whoami (expected to fail without OIDC):"
-          npm whoami || true
-
       - name: Build the publishable artifact
         run: yarn prepare
 
@@ -93,7 +75,7 @@ jobs:
         # cause. The `oidc` verbose lines name it exactly — the registry's own
         # message for a refused exchange, a missing token in the response, or
         # skipped-for-permissions.
-        run: npm publish --provenance --access public --loglevel verbose
+        run: npm publish --access public --loglevel verbose
 
       - name: Verify what the registry now serves
         run: |
