@@ -12,6 +12,7 @@
 //
 // See shapeup/hls-caching-features/spec/contracts/cache-file-store.contract.md.
 
+import { Platform } from 'react-native';
 import type { SessionTaskInterface } from '../types/type';
 import {
   FileBucket,
@@ -21,12 +22,38 @@ import {
 } from './fileSystem';
 import { SimpleSessionProvider } from './session';
 import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
+import { absoluteFilePath } from '../Utils/util';
 import { KEY_PREFIX } from '../Utils/constants';
 import { checkPromote, setDownloading } from './pinGenerationGuard';
 
 export interface WriteTempResult {
   tempPath: string;
   contentLength: number | null;
+  // NEW this round (TASK-001, UC-RangedSegmentCacheWrite) — origin's real
+  // HTTP status (206 for a satisfied range, else origin's status) and the
+  // Content-Range header when origin sent one, threaded through so a future
+  // caller (TASK-003) can pass both back to the player instead of a
+  // hard-coded 200.
+  status: number;
+  contentRange?: string;
+}
+
+export interface VerifyAndPromoteResult {
+  promoted: boolean;
+  finalPath: string | null;
+}
+
+// BUG-11 (UC-OriginErrorRejection): thrown by verifyAndPromote instead of a
+// normal return so the real origin status survives to the caller — a
+// non-2xx origin response is never silently promoted, and never masked as a
+// synthesized 500.
+export class OriginStatusRejectedError extends Error {
+  status: number;
+  constructor(status: number) {
+    super(`origin responded with non-2xx status ${status}`);
+    this.name = 'OriginStatusRejectedError';
+    this.status = status;
+  }
 }
 
 // HTTP/2 origins deliver lowercase header names (same rationale as
@@ -52,6 +79,25 @@ export function contentLengthOf(headers?: {
     }
   }
   return null;
+}
+
+// Same case-insensitive scan as contentLengthOf, for the Content-Range
+// header (NEW this round — WriteTempResult.contentRange).
+function contentRangeOf(headers?: {
+  [key in string]?: string;
+}): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === 'content-range') {
+      const raw = headers[key];
+      return raw === undefined || raw === null || String(raw).trim() === ''
+        ? undefined
+        : raw;
+    }
+  }
+  return undefined;
 }
 
 // tempCachePathFor's inverse: a tempPath is always `<finalPath><suffix>`
@@ -86,31 +132,87 @@ export class CacheFileRepository {
   }
 
   /**
-   * Method: writeTemp(url, key) (Write).
+   * Method: writeTemp(url, key, opts?) (Write).
    * Downloads direct-to-disk to the TEMP path (`<CacheKey>.<tempSuffix>`,
    * never the final path) and marks `key` downloading (TASK-005
    * isEvictable's second condition) for the duration of the transfer.
+   * NEW this round (TASK-001, UC-RangedSegmentCacheWrite): `opts.headers` is
+   * forwarded to the origin request, and when it carries a `Range` header
+   * the final/temp path is derived via `absoluteFilePath`'s existing
+   * `bytes=(\d+)-(\d+)` suffix regex — the SAME derivation the read path
+   * already uses, so a ranged write and its later ranged read land at the
+   * identical path (INV-01). `opts` omitted behaves byte-identically to
+   * before this task (TS-INV-02): un-suffixed path, no headers forwarded.
    * Error Cases: a network error/cancellation or disk-full both reject this
    * promise (StorageError) — the CALLER is responsible for deleting the
    * temp via unlink(); no partial ever reaches verifyAndPromote.
    */
-  async writeTemp(url: string, key: string): Promise<WriteTempResult> {
-    const finalPath = CacheKeyPolicy.filePathFor(
+  async writeTemp(
+    url: string,
+    key: string,
+    opts?: { headers?: Record<string, string> }
+  ): Promise<WriteTempResult> {
+    const headers = opts?.headers;
+    const basePath = CacheKeyPolicy.filePathFor(
       url,
       this.cacheFolder,
       KEY_PREFIX
     );
+    // absoluteFilePath is a no-op (returns basePath unchanged) when headers
+    // is absent, has no Range key, or the Range value doesn't match the
+    // regex (malformed) — covers TS-REQ-headers-missing/range-boundary
+    // without any extra branching here.
+    const finalPath = headers ? absoluteFilePath(basePath, headers) : basePath;
     const tempPath = tempCachePathFor(finalPath);
 
     setDownloading(key, true);
     try {
+      // BUG-17 — Android cannot use react-native-blob-util's stream-to-file
+      // path. Measured on an Android 16 emulator against 0.24.10: every
+      // download truncates to EXACTLY 8192 bytes (one Okio segment), so
+      // anything larger fails its Content-Length check and is never cached —
+      // i.e. no real HLS segment ever caches, and playback shows nothing.
+      //
+      // Upstream cause, for whoever revisits this:
+      // `ReactNativeBlobUtilFileResp.ProgressReportingSource.read()` writes
+      // each chunk to the destination file but NEVER writes it into the Okio
+      // `sink`. The drain loop in `ReactNativeBlobUtilReq.done()` therefore
+      // sees an empty buffer after the first 8192-byte read, treats it as EOF,
+      // stops, and `isDownloadComplete()` (bytesDownloaded == contentLength)
+      // fails -> the promise rejects with "Download interrupted." Verified
+      // exactly at the boundary: 8192 B succeeds, 8193 B fails.
+      //
+      // Workaround: on Android take the body in memory (blob-util's
+      // KeepInMemory path, which is unaffected) and write the file ourselves.
+      // Platform-gated deliberately — iOS streams straight to disk correctly
+      // and is verified working, so it keeps the lower-memory path.
+      if (Platform.OS === 'android') {
+        const response = await this.sessionTask.dataTask(url, {
+          ...(headers ? { headers } : {}),
+        });
+        const contentLength = contentLengthOf(response?.respInfo?.headers);
+        const status = response?.respInfo?.status ?? 200;
+        const contentRange = contentRangeOf(response?.respInfo?.headers);
+        // `RNFB-Response: base64` (set in SimpleSessionProvider.dataTask)
+        // makes `data` a base64 string for the in-memory path.
+        await this.storage.write(
+          tempPath,
+          String(response?.data ?? ''),
+          'base64'
+        );
+        return { tempPath, contentLength, status, contentRange };
+      }
+
       const response = await this.sessionTask.dataTask(url, {
         overwrite: true,
         fileCache: true,
         path: tempPath,
+        ...(headers ? { headers } : {}),
       });
       const contentLength = contentLengthOf(response?.respInfo?.headers);
-      return { tempPath, contentLength };
+      const status = response?.respInfo?.status ?? 200;
+      const contentRange = contentRangeOf(response?.respInfo?.headers);
+      return { tempPath, contentLength, status, contentRange };
     } catch (error) {
       // download failed/cancelled before verifyAndPromote is ever reached —
       // clear the downloading mark here since no later call will.
@@ -120,25 +222,43 @@ export class CacheFileRepository {
   }
 
   /**
-   * Method: verifyAndPromote(tempPath, contentLength, key, generation)
-   * (Write). Returns the final path on success; `null` on ANY of: size
-   * mismatch, missing Content-Length (not verifiable — conservative,
-   * matches fix-core-caching-bugs' UC-CacheLargeFile precedent), or a stale
-   * generation — NEVER a throw. `checkPromote` (TASK-005) is consulted
-   * BEFORE the atomic move: a stale-generation promote never touches the
-   * final path (R4, no-resurrection guard).
+   * Method: verifyAndPromote(tempPath, contentLength, key, generation,
+   * originStatus?) (Write). Returns `{ promoted, finalPath }`; `finalPath`
+   * is `null` (`promoted: false`) on size mismatch, missing Content-Length
+   * (not verifiable — conservative, matches fix-core-caching-bugs'
+   * UC-CacheLargeFile precedent), or a stale generation. `checkPromote`
+   * (TASK-005) is consulted BEFORE the atomic move: a stale-generation
+   * promote never touches the final path (R4, no-resurrection guard).
+   * NEW this round (TASK-002, BUG-11): `originStatus` outside `[200,299]`
+   * discards the temp file and THROWS `OriginStatusRejectedError` (the real
+   * status, never masked as 500) instead of returning — a non-2xx body
+   * (e.g. a 403 error page with a matching Content-Length) is rejected
+   * before it can reach the size check and be mistaken for verified media.
+   * `originStatus` omitted preserves pre-round-4 behavior exactly (existing
+   * callers not yet migrated — TASK-003 is the migration).
    */
   async verifyAndPromote(
     tempPath: string,
     contentLength: number | null,
     key: string,
-    generation: number
-  ): Promise<string | null> {
+    generation: number,
+    originStatus?: number
+  ): Promise<VerifyAndPromoteResult> {
     try {
+      if (
+        typeof originStatus === 'number' &&
+        (originStatus < 200 || originStatus > 299)
+      ) {
+        // ORIGIN_STATUS_REJECTED (BUG-11) — checked before size/generation
+        // so a non-2xx body can never slip through on a matching size.
+        await this.discardTemp(tempPath);
+        throw new OriginStatusRejectedError(originStatus);
+      }
+
       if (contentLength === null) {
         // NO_CONTENT_LENGTH (chunked transfer): not verifiable — discard.
         await this.discardTemp(tempPath);
-        return null;
+        return { promoted: false, finalPath: null };
       }
 
       const stat = await this.storage.getStatistic(tempPath);
@@ -146,19 +266,19 @@ export class CacheFileRepository {
       if (actualSize !== contentLength) {
         // SIZE_MISMATCH: incomplete/corrupt download — discard.
         await this.discardTemp(tempPath);
-        return null;
+        return { promoted: false, finalPath: null };
       }
 
       if (!checkPromote(key, generation)) {
         // STALE_GENERATION: asset evicted/removed mid-download — discard,
         // atomic move NEVER attempted (this is the check BEFORE the move).
         await this.discardTemp(tempPath);
-        return null;
+        return { promoted: false, finalPath: null };
       }
 
       const finalPath = finalPathFromTemp(tempPath);
       await this.storage.moveFile(tempPath, finalPath);
-      return finalPath;
+      return { promoted: true, finalPath };
     } finally {
       // the download/verify window (started at writeTemp) has settled —
       // regardless of outcome, `key` is no longer downloading.

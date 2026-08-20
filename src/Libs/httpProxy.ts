@@ -1,4 +1,5 @@
 import { DeviceEventEmitter } from 'react-native';
+import type { EmitterSubscription } from 'react-native';
 import { NativeModules, Platform } from 'react-native';
 import type {
   BridgeServerInterface,
@@ -34,6 +35,13 @@ export const CacheVideoHttpProxy: HttpServerSpec = CacheVideoHttpProxyModule
       }
     );
 
+// TASK-004 (UC-SingleProxyListenerLifecycle): the single subscription this
+// module ever holds. Module-level (not per-BridgeServer) because
+// DeviceEventEmitter's 'httpServerResponseReceived' channel is itself
+// process-global — tracking it here is what lets `start` remove a stale
+// listener from a prior call before adding a new one.
+let currentSubscription: EmitterSubscription | null = null;
+
 export const HttpProxy = {
   start: (
     port: number,
@@ -48,10 +56,21 @@ export const HttpProxy = {
       throw new Error('Invalid service name');
     }
 
+    // TASK-004: remove any existing subscription before adding a new one —
+    // a stale listener from a prior/racing start must never stack (single
+    // subscription invariant).
+    if (currentSubscription) {
+      currentSubscription.remove();
+      currentSubscription = null;
+    }
+
     // Register the request listener BEFORE the bind settles so requests that
     // arrive immediately after bind are not dropped; a failed start is cleaned
     // up by the caller via HttpProxy.stop (removeAllListeners).
-    DeviceEventEmitter.addListener('httpServerResponseReceived', callback);
+    currentSubscription = DeviceEventEmitter.addListener(
+      'httpServerResponseReceived',
+      callback
+    );
     // Propagate the native result — never fire-and-forget. Promise.resolve
     // guards against a stale old-arch native binary whose start returns void.
     return Promise.resolve(CacheVideoHttpProxy.start(port, serviceName));
@@ -60,10 +79,16 @@ export const HttpProxy = {
   stop: () => {
     CacheVideoHttpProxy.stop();
     DeviceEventEmitter.removeAllListeners('httpServerResponseReceived');
+    currentSubscription = null;
   },
 
-  respond: (requestId: string, code: number, type: string, body: string) =>
-    CacheVideoHttpProxy.respond(requestId, code, type, body),
+  respond: (
+    requestId: string,
+    code: number,
+    type: string,
+    body: string,
+    headersJson?: string
+  ) => CacheVideoHttpProxy.respond(requestId, code, type, body, headersJson),
 };
 //
 class Request implements RequestInterface {
@@ -98,12 +123,72 @@ class Response implements ResponseInterface {
     this.closed = false;
   }
 
-  send(code: number, type: string, body: string) {
+  send(
+    code: number,
+    type: string,
+    body: string,
+    // UC-RangedSegmentCacheWrite Step 7 (0.5.0): additional response headers,
+    // e.g. { 'Content-Range': 'bytes 0-1023/272412' } on a 206. Serialized to
+    // JSON here because that is what the native `respond` accepts on both
+    // platforms; omitted entirely when empty so the four-argument native call
+    // is byte-identical to pre-0.5.0 for every existing caller.
+    headers?: { [key in string]: string }
+  ) {
     if (this.closed) {
       throw new Error('Response already sent');
     }
 
-    HttpProxy.respond(this.requestId, code, type, body);
+    // TASK-005 (UC-SafeErrorBodyBridging, BUG-8): base64-encode the body
+    // unconditionally, on every call path (json/html/every plain-text
+    // error literal) — the single choke point every response crosses
+    // before the native bridge, so Android's strict
+    // Base64.getDecoder().decode never receives a plain-text body.
+    // Buffer's utf8 read round-trips empty/very-long/non-ASCII bodies
+    // without throwing.
+    const Buffer = require('buffer').Buffer;
+    const encodedBody = Buffer.from(body, 'utf8').toString('base64');
+
+    this.dispatch(code, type, encodedBody, headers);
+  }
+
+  /**
+   * Send a body that is ALREADY base64 — media bytes read off disk
+   * (`read(path,'base64')`, `readStream` whose default format is base64) and
+   * playlists returned by `reverseProxyPlaylist`, which base64-encodes its
+   * result.
+   *
+   * Why this exists: the native contract is "body is base64", and `send`
+   * honours it by encoding. Routing an already-encoded body through `send`
+   * encodes it TWICE — native decodes once and the player receives base64
+   * TEXT instead of bytes. Unit tests cannot catch that on their own, because
+   * double-encoded base64 is still perfectly valid base64; it was found by
+   * curling the running proxy on a simulator, where the playlist came back as
+   * `I0VYVE0zVQ...`. Keep the two paths explicit rather than guessing at the
+   * body's encoding.
+   */
+  sendRaw(
+    code: number,
+    type: string,
+    base64Body: string,
+    headers?: { [key in string]: string }
+  ) {
+    if (this.closed) {
+      throw new Error('Response already sent');
+    }
+    this.dispatch(code, type, base64Body, headers);
+  }
+
+  private dispatch(
+    code: number,
+    type: string,
+    base64Body: string,
+    headers?: { [key in string]: string }
+  ) {
+    const headerKeys = headers ? Object.keys(headers) : [];
+    const headersJson =
+      headerKeys.length > 0 ? JSON.stringify(headers) : undefined;
+
+    HttpProxy.respond(this.requestId, code, type, base64Body, headersJson);
     this.closed = true;
   }
 
@@ -123,6 +208,11 @@ export class BridgeServer implements BridgeServerInterface {
   boundPort: number | null = null;
   callbacks: { method: string; url: string; callback: Function }[];
   static server: BridgeServer;
+  // TASK-004 (UC-SingleProxyListenerLifecycle): the in-flight `listen()`
+  // promise, set BEFORE `HttpProxy.start` is awaited — a second concurrent
+  // `listen()` call awaits this SAME promise instead of racing a second
+  // native start.
+  private starting: Promise<number> | null = null;
 
   constructor(serviceName: string, devMode: boolean) {
     if (!serviceName) {
@@ -181,6 +271,11 @@ export class BridgeServer implements BridgeServerInterface {
       // legacy no-op semantics preserved: report the port already bound
       return this.boundPort as number;
     }
+    // TASK-004: a second concurrent listen() call joins the SAME in-flight
+    // start instead of racing HttpProxy.start() a second time.
+    if (this.starting) {
+      return this.starting;
+    }
     // Contract #Request bounds (native-start.contract.md): port is REQUIRED,
     // an integer in the ephemeral range 49152-65535 — reject BEFORE any
     // native call (UC-StartCacheServer TS-REQ-port-boundary/-missing).
@@ -193,6 +288,19 @@ export class BridgeServer implements BridgeServerInterface {
       );
     }
 
+    // TASK-004: the guard promise is assigned BEFORE it is awaited below —
+    // any listen() call that arrives while this is pending sees `this.starting`
+    // already set (the assignment itself synchronously invokes HttpProxy.start,
+    // registering the listener, before control returns to any caller).
+    this.starting = this.startNative(port);
+    try {
+      return await this.starting;
+    } finally {
+      this.starting = null;
+    }
+  };
+
+  private startNative = async (port: number): Promise<number> => {
     const result = await HttpProxy.start(
       port,
       this.serviceName,
@@ -233,5 +341,6 @@ export class BridgeServer implements BridgeServerInterface {
     HttpProxy.stop();
     this.isRunning = false;
     this.boundPort = null;
+    this.starting = null;
   }
 }

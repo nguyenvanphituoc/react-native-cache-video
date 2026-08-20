@@ -111,7 +111,15 @@ describe('TASK-003/TASK-015: signature-rotation round trip per migrated call sit
     const SEGMENT_2 =
       'https://cdn.example.com/hls/segment1.ts?Expires=2000&Signature=xyz999';
     const cachedPath = filePathFor(SEGMENT_1, manager.cacheFolder, KEY_PREFIX);
-    BlobUtilMock.__seedFile(cachedPath, 'CACHED-SEGMENT-BYTES');
+    // Seeded as BASE64 on purpose. The disk-hit path serves the file through
+    // readStream(path,'base64'), which on a real device returns base64 — and
+    // that body goes to the bridge via sendRaw (already-encoded), NOT send.
+    // The mock returns stored content verbatim, so storing base64 here is what
+    // makes it behave like the real reader.
+    BlobUtilMock.__seedFile(
+      cachedPath,
+      Buffer.from('CACHED-SEGMENT-BYTES', 'utf8').toString('base64')
+    );
 
     const emitProxiedRequest = (originUrl: string) => {
       const proxied = new URL(reverseProxyURL(originUrl, port));
@@ -136,7 +144,13 @@ describe('TASK-003/TASK-015: signature-rotation round trip per migrated call sit
     expect(NativeProxyMock.respond).toHaveBeenCalledTimes(2);
     for (const call of (NativeProxyMock.respond as jest.Mock).mock.calls) {
       expect(call[1]).toBe(200);
-      expect(call[3]).toBe('CACHED-SEGMENT-BYTES');
+      // BUG-8 (TASK-005): every body crossing the native bridge is now
+      // base64 — Android's Base64.getDecoder().decode throws on plain text,
+      // which hung the proxy. Assert the decoded payload so this covers the
+      // encoding contract AND the bytes, rather than an opaque literal.
+      expect(Buffer.from(call[3], 'base64').toString('utf8')).toBe(
+        'CACHED-SEGMENT-BYTES'
+      );
     }
   });
 

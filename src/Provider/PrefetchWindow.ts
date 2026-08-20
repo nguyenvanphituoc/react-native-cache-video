@@ -60,14 +60,21 @@ import { absoluteURL, isHLSUrl } from '../Utils/util';
 export interface VerifiedWriteRepo {
   writeTemp(
     url: string,
-    key: string
-  ): Promise<{ tempPath: string; contentLength: number | null }>;
+    key: string,
+    opts?: { headers?: Record<string, string> }
+  ): Promise<{
+    tempPath: string;
+    contentLength: number | null;
+    status?: number;
+    contentRange?: string;
+  }>;
   verifyAndPromote(
     tempPath: string,
     contentLength: number | null,
     key: string,
-    generation: number
-  ): Promise<string | null>;
+    generation: number,
+    originStatus?: number
+  ): Promise<{ promoted: boolean; finalPath: string | null }>;
 }
 
 // BUG-3 fix (r2-a1): structural, feature-detected superset of
@@ -107,6 +114,53 @@ export interface PrefetchItem {
   status: PrefetchItemStatus;
 }
 
+// BUG-12 (UC-SlidingWindowSegmentDelivery). A master playlist is identified by
+// EXT-X-STREAM-INF, the tag that introduces a variant stream (RFC 8216 §4.3.4.2).
+// EXT-X-MEDIA alone does NOT make a master — it can appear alongside variants but
+// carries no media-segment URIs of its own, so keying on it would misclassify.
+export function isMasterPlaylist(text: string): boolean {
+  return /^#EXT-X-STREAM-INF:/m.test(text);
+}
+
+// Pick the variant to warm from a master playlist: the LOWEST advertised
+// BANDWIDTH. Rationale — a prefetch is a bet placed before the player has
+// chosen a rendition, so the cheapest ladder rung wastes the least data when
+// the bet is wrong, and it is where HLS players conventionally start before
+// adapting upward. Returns null when no variant URI can be resolved, which
+// leaves the caller on its pre-fix path rather than inventing a URL.
+export function selectVariant(text: string, baseUrl: string): string | null {
+  const lines = text.split('\n').map((l) => l.trim());
+  let best: { bandwidth: number; uri: string } | null = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || !line.startsWith('#EXT-X-STREAM-INF:')) {
+      continue;
+    }
+    // The variant URI is the next non-blank, non-tag line after the tag.
+    let uri: string | undefined;
+    for (let j = i + 1; j < lines.length; j++) {
+      const candidate = lines[j];
+      if (candidate && !candidate.startsWith('#')) {
+        uri = candidate;
+        break;
+      }
+    }
+    if (!uri) {
+      continue;
+    }
+    const match = /BANDWIDTH=(\d+)/.exec(line);
+    // A variant with no BANDWIDTH attribute is malformed per the RFC; rank it
+    // last rather than dropping it, so a ladder of such entries still warms.
+    const bandwidth = match?.[1] ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+    if (!best || bandwidth < best.bandwidth) {
+      best = { bandwidth, uri };
+    }
+  }
+
+  return best ? absoluteURL(best.uri, baseUrl) : null;
+}
+
 export interface SetActiveWindowOpts {
   ahead?: number;
   behind?: number;
@@ -139,12 +193,14 @@ const DEFAULT_SEGMENT_COUNT = 3;
 const BUSY_POLL_MS = 250;
 const BUSY_POLL_MAX_TICKS = 240;
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export class PrefetchWindow {
   private items: PrefetchItem[] = [];
+  // TASK-007 (BUG-14 fix, UC-GracefulTestTeardown): the ONE busy-poll timer
+  // in flight at a time (waitUntilNotBusy's 250ms poll is a serial `await`
+  // loop, never concurrent) — tracked so cancel()/dispose() can
+  // clearTimeout() it instead of leaving it to fire into a torn-down
+  // context.
+  private busyPollTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionTask: SessionTaskInterface;
   private segmentCount: number;
   private cacheFileRepo: VerifiedWriteRepo;
@@ -218,6 +274,38 @@ export class PrefetchWindow {
   private markPrefetch(url: string, active: boolean): void {
     const ext = this.sessionTask as Partial<PrefetchAwareSessionTask>;
     ext.markPrefetch?.(url, active);
+  }
+
+  // - MARK: UC-GracefulTestTeardown (TASK-007, BUG-14 fix)
+  // `unref()`'d immediately after creation (step 2) so the busy-poll timer
+  // never keeps the Node/Jest process alive on its own; the handle is kept
+  // on `this.busyPollTimer` so cancel()/dispose() can clearTimeout() it
+  // (step 3) instead of leaving it to fire into a torn-down context.
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const handle = setTimeout(() => {
+        this.busyPollTimer = null;
+        resolve();
+      }, ms);
+      handle.unref?.();
+      this.busyPollTimer = handle;
+    });
+  }
+
+  /** Clears any pending busy-poll timer (step 3) — safe to call whether or
+   *  not one is currently scheduled; idempotent. */
+  cancel(): void {
+    if (this.busyPollTimer !== null) {
+      clearTimeout(this.busyPollTimer);
+      this.busyPollTimer = null;
+    }
+  }
+
+  /** Alias for `cancel()` (UC-GracefulTestTeardown's `dispose()` signal) —
+   *  same timer-teardown effect, named for callers that treat this instance
+   *  as a disposable resource rather than an in-flight cancellation. */
+  dispose(): void {
+    this.cancel();
   }
 
   // - MARK: UC-SetActiveWindow
@@ -424,6 +512,11 @@ export class PrefetchWindow {
     // even if the item leaves the window before any segment starts.
     await this.registerPrefetchedPlaylist(url, playlistText);
 
+    // TASK-006 (BUG-10 fix): the owner key segments register under —
+    // identical to the key `registerPrefetchedPlaylist` just upserted the
+    // `hls` entry under — so `registerSegmentUnderOwner` below finds it.
+    const ownerKey = CacheKeyPolicy.keyFor(url);
+
     if (isCancelled()) {
       return { url, status: 'cancelled', segmentsIngested: 0 };
     }
@@ -445,7 +538,7 @@ export class PrefetchWindow {
         return { url, status: 'cancelled', segmentsIngested: ingested };
       }
 
-      const success = await this.ingestSegment(segmentUrl);
+      const success = await this.ingestSegment(segmentUrl, ownerKey);
       if (!success) {
         // step 5: stop after the current in-flight segment settles, do not
         // start the next one.
@@ -465,7 +558,7 @@ export class PrefetchWindow {
       if (!this.isBusy()) {
         return true;
       }
-      await delay(BUSY_POLL_MS);
+      await this.delay(BUSY_POLL_MS);
     }
     return !this.isBusy();
   }
@@ -478,7 +571,12 @@ export class PrefetchWindow {
   // the decoded raw text (BUG-3 fix, r2-a1) so `registerPrefetchedPlaylist`
   // can persist it without re-fetching.
   private async fetchPlaylist(
-    playlistUrl: string
+    playlistUrl: string,
+    // BUG-12 fix: guards the ONE level of descent below. A master playlist
+    // may only point at media playlists (RFC 8216 §4.3.4.2 — variants are
+    // never themselves masters), so one level is the complete case; the flag
+    // makes a malformed/self-referential ladder terminate instead of looping.
+    allowVariantDescent: boolean = true
   ): Promise<{ text: string; segmentUrls: string[] }> {
     this.markPrefetch(playlistUrl, true);
     let response;
@@ -491,11 +589,30 @@ export class PrefetchWindow {
     const Buffer = require('buffer').Buffer;
     const text = Buffer.from(response?.data ?? '', 'base64').toString('utf8');
 
-    const segmentUrls = text
+    const uris = text
       .split('\n')
       .map((line: string) => line.trim())
-      .filter((line: string) => line.length > 0 && !line.startsWith('#'))
-      .map((line: string) => absoluteURL(line, playlistUrl));
+      .filter((line: string) => line.length > 0 && !line.startsWith('#'));
+
+    // BUG-12 (UC-SlidingWindowSegmentDelivery, hypothesis (a) — CONFIRMED
+    // against https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8): a MASTER
+    // playlist's non-tag lines are variant playlist URIs, not media segments.
+    // Treating them as segments (the pre-fix behavior) "warms" five tiny
+    // .m3u8 files and lands no media at all — exactly the 2026-07-26 smoke
+    // symptom. Descend one level into the variant and take ITS segments.
+    if (allowVariantDescent && isMasterPlaylist(text)) {
+      const variantUrl = selectVariant(text, playlistUrl);
+      if (variantUrl) {
+        const variant = await this.fetchPlaylist(variantUrl, false);
+        // Return the MASTER's text (it is what this url caches/serves as the
+        // playlist body) with the VARIANT's real media segments.
+        return { text, segmentUrls: variant.segmentUrls };
+      }
+    }
+
+    const segmentUrls = uris.map((line: string) =>
+      absoluteURL(line, playlistUrl)
+    );
 
     return { text, segmentUrls };
   }
@@ -545,12 +662,16 @@ export class PrefetchWindow {
       const contentLength = Buffer.byteLength(rawText, 'utf8');
 
       await this.storage.write(tempPath, rawText, 'utf8');
-      const promoted = await this.cacheFileRepo.verifyAndPromote(
+      // verifyAndPromote returns {promoted, finalPath} since TASK-002 widened
+      // it for the origin-status gate (BUG-11); collapse it back to the
+      // path-or-null this call site has always branched on.
+      const promoteResult = await this.cacheFileRepo.verifyAndPromote(
         tempPath,
         contentLength,
         key,
         generation
       );
+      const promoted = promoteResult.promoted ? promoteResult.finalPath : null;
       if (promoted === null) {
         // AssetDiscarded (size mismatch / stale generation) — never
         // register a write that didn't verify/promote.
@@ -596,7 +717,7 @@ export class PrefetchWindow {
   // path `CacheKeyPolicy.filePathFor` derives for it, so a later real
   // segment request through `addSegmentHandler`'s disk-first branch is
   // served as a cache hit with no re-download.
-  private async ingestSegment(url: string): Promise<boolean> {
+  private async ingestSegment(url: string, ownerKey: string): Promise<boolean> {
     const key = CacheKeyPolicy.keyFor(url);
     const generation = getGeneration(key);
     this.markPrefetch(url, true);
@@ -605,12 +726,23 @@ export class PrefetchWindow {
         url,
         key
       );
-      await this.cacheFileRepo.verifyAndPromote(
+      const promoteResult = await this.cacheFileRepo.verifyAndPromote(
         tempPath,
         contentLength,
         key,
         generation
       );
+      const promoted = promoteResult.promoted ? promoteResult.finalPath : null;
+      // TASK-006 (BUG-10 fix): register under the owner ONLY after a
+      // successful disk write (`promoted !== null` — verifyAndPromote
+      // already returned null for a discard: no Content-Length / size
+      // mismatch / stale generation, same gate `registerPrefetchedPlaylist`
+      // uses above). `contentLength` is guaranteed non-null here (that's one
+      // of the discard conditions), so it's a safe boundary value (0, 1, or
+      // arbitrarily large — plain number addition, no bitwise/Int32 path).
+      if (promoted !== null) {
+        this.registerSegmentUnderOwner(ownerKey, promoted, contentLength ?? 0);
+      }
       return true;
     } catch (error) {
       // network error/cancellation (e.g. session.cancelTask fired while this
@@ -619,6 +751,45 @@ export class PrefetchWindow {
     } finally {
       this.markPrefetch(url, false);
     }
+  }
+
+  // TASK-006 (BUG-10 fix, UC-PrefetchSegmentRegistration): appends
+  // `segmentPath` to the owner's `segmentPaths`/`bytes` via the SAME
+  // `HlsRegistryAwareDelegate.memoryCache` seam `registerPrefetchedPlaylist`
+  // above already uses — no new seam, no substrate widening (mirrors
+  // `ProxyCacheManager.registerSegmentUnderOwner`'s shape, but reached only
+  // through the delegate reference this class already holds). Deterministic
+  // no-op (never throws) when the owner isn't registered yet (no delegate,
+  // no memoryCache, or no prior `hls` entry under `ownerKey` — e.g. the
+  // playlist's own registration above was itself discarded) — a segment is
+  // never dropped SILENTLY in the sense of crashing or corrupting state; it
+  // simply isn't registered until an owner exists, exactly like
+  // `registerPrefetchedPlaylist`'s own missing-delegate branch.
+  private registerSegmentUnderOwner(
+    ownerKey: string,
+    segmentPath: string,
+    bytes: number
+  ): void {
+    const registry = this.getDelegate?.()?.memoryCache;
+    if (!registry?.get || !registry?.put) {
+      return;
+    }
+
+    const owner = registry.get(ownerKey);
+    if (!owner || owner.kind !== 'hls') {
+      return;
+    }
+    if (owner.segmentPaths.includes(segmentPath)) {
+      // idempotent — a repeat registration of the same path never
+      // double-counts bytes.
+      return;
+    }
+
+    registry.put(ownerKey, {
+      ...owner,
+      segmentPaths: [...owner.segmentPaths, segmentPath],
+      bytes: owner.bytes + bytes,
+    });
   }
 
   // Fallback media ingestor (UC-PrefetchHlsAsset step 4) for callers that

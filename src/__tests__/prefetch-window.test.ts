@@ -15,6 +15,8 @@
 import {
   PrefetchWindow,
   PREFETCH_WINDOW_CHANGED_EVENT,
+  isMasterPlaylist,
+  selectVariant,
   type VerifiedWriteRepo,
   type HlsRegistryAwareDelegate,
 } from '../Provider/PrefetchWindow';
@@ -71,9 +73,10 @@ function createFakeRepo(): FakeRepo {
       tempPath: `/mock/tmp/${key}.part`,
       contentLength: 10,
     })),
-    verifyAndPromote: jest.fn(async (tempPath: string) =>
-      tempPath.replace(/\.part$/, '')
-    ),
+    verifyAndPromote: jest.fn(async (tempPath: string) => ({
+      promoted: true,
+      finalPath: tempPath.replace(/\.part$/, ''),
+    })),
   };
 }
 
@@ -416,6 +419,79 @@ describe('R8 combined regression: playback priority + cancel-on-exit', () => {
 });
 
 // ---------------------------------------------------------------------------
+// UC-GracefulTestTeardown (TASK-007, BUG-14 fix)
+// ---------------------------------------------------------------------------
+describe('UC-GracefulTestTeardown — busy-poll timer unref/clear (TASK-007)', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('TS-REQ-timer-cleared-on-cancel: cancel() while a busy-poll timer is pending clears it — the poll never fires again, no stray callback', async () => {
+    const session = createFakeSession();
+    session.isBusy.mockReturnValue(true); // keeps waitUntilNotBusy polling
+    session.dataTask.mockImplementation(async () => ({
+      data: b64(buildPlaylist(1)),
+    }));
+    const repo = createFakeRepo();
+    const window = new PrefetchWindow(session, {
+      cacheFileRepo: repo,
+      segmentCount: 1,
+    });
+
+    window.setActiveWindow(
+      ['https://cdn.example.com/stream/index.m3u8'],
+      0,
+      {}
+    );
+    // let the first poll's setTimeout(250) get scheduled
+    await jest.advanceTimersByTimeAsync(0);
+    expect(session.isBusy).toHaveBeenCalled();
+    const isBusyCallsBeforeCancel = session.isBusy.mock.calls.length;
+
+    window.cancel();
+
+    // advance well past the 60s poll bound — if the cleared timer had fired,
+    // isBusy() would be polled again (it would still be true, so dataTask
+    // never fires either way; the assertion is on isBusy() call count not
+    // growing, which only happens if the timer never re-armed).
+    await jest.advanceTimersByTimeAsync(120_000);
+    expect(session.isBusy.mock.calls.length).toBe(isBusyCallsBeforeCancel);
+    expect(session.dataTask).not.toHaveBeenCalled();
+  });
+
+  it('dispose() has the same timer-teardown effect as cancel()', async () => {
+    const session = createFakeSession();
+    session.isBusy.mockReturnValue(true);
+    const repo = createFakeRepo();
+    const window = new PrefetchWindow(session, {
+      cacheFileRepo: repo,
+      segmentCount: 1,
+    });
+
+    window.setActiveWindow(
+      ['https://cdn.example.com/stream/index.m3u8'],
+      0,
+      {}
+    );
+    await jest.advanceTimersByTimeAsync(0);
+    const isBusyCallsBeforeDispose = session.isBusy.mock.calls.length;
+
+    window.dispose();
+
+    await jest.advanceTimersByTimeAsync(120_000);
+    expect(session.isBusy.mock.calls.length).toBe(isBusyCallsBeforeDispose);
+  });
+
+  it('cancel() with no pending timer is a safe no-op', () => {
+    const session = createFakeSession();
+    const window = new PrefetchWindow(session, {
+      cacheFileRepo: createFakeRepo(),
+    });
+    expect(() => window.cancel()).not.toThrow();
+    expect(() => window.dispose()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // PreCacheProvider.preCacheFor(hlsUrl) — TASK-012 AC3
 // ---------------------------------------------------------------------------
 describe('PreCacheProvider.preCacheFor(hlsUrl) — delegates into the prefetch runner (TASK-012 AC3)', () => {
@@ -465,7 +541,7 @@ describe('BUG-3 fix: prefetchHlsAsset registers its playlist via the PreCacheDel
     } satisfies HlsRegistryAwareDelegate & { __store: Map<string, any> };
   }
 
-  it('unit: registers a kind:"hls" CacheEntry (playlistPath set, segmentPaths empty) under the playlist key via the delegate\'s memoryCache seam', async () => {
+  it('unit: registers a kind:"hls" CacheEntry (playlistPath set, segment ingested and registered under it) via the delegate\'s memoryCache seam', async () => {
     const session = createFakeSession();
     session.dataTask.mockImplementation(async () => ({
       data: b64(buildPlaylist(1)),
@@ -486,7 +562,13 @@ describe('BUG-3 fix: prefetchHlsAsset registers its playlist via the PreCacheDel
     const owner = delegate.__store.get(key);
     expect(owner).toMatchObject({
       kind: 'hls',
-      segmentPaths: [],
+      // TASK-006 (BUG-10 fix): the one segment ingested above is now
+      // registered under the owner immediately after ingest, before the
+      // player ever requests it through the proxy.
+      segmentPaths: [
+        '/mock/tmp/' +
+          CacheKeyPolicy.keyFor('https://cdn.example.com/stream/seg0.ts'),
+      ],
     });
     expect(typeof owner.playlistPath).toBe('string');
     expect(owner.playlistPath.length).toBeGreaterThan(0);
@@ -540,6 +622,149 @@ describe('BUG-3 fix: prefetchHlsAsset registers its playlist via the PreCacheDel
   });
 
   // -------------------------------------------------------------------------
+  // TASK-006 (BUG-10 fix, UC-PrefetchSegmentRegistration): ingestSegment
+  // registers under the owner via the SAME delegate.memoryCache seam
+  // registerPrefetchedPlaylist above already uses.
+  // -------------------------------------------------------------------------
+  describe('TASK-006: ingestSegment registers under its owner (UC-PrefetchSegmentRegistration)', () => {
+    it('an ownerKey with no prior registration (playlist registration itself discarded) → segment write does not crash and is not silently corrupted, just not registered', async () => {
+      const session = createFakeSession();
+      session.dataTask.mockImplementation(async () => ({
+        data: b64(buildPlaylist(1)),
+      }));
+      const delegate = createFakeHlsDelegate();
+      let verifyAndPromoteCalls = 0;
+      const repo: FakeRepo = {
+        writeTemp: jest.fn(async (_url: string, key: string) => ({
+          tempPath: `/mock/tmp/${key}.part`,
+          contentLength: 10,
+        })),
+        // 1st call is the playlist's own verifyAndPromote — force a discard
+        // (AssetDiscarded) so NO owner entry is ever created; every
+        // subsequent call (segments) promotes normally.
+        verifyAndPromote: jest.fn(async (tempPath: string) => {
+          verifyAndPromoteCalls++;
+          return verifyAndPromoteCalls === 1
+            ? { promoted: false, finalPath: null }
+            : { promoted: true, finalPath: tempPath.replace(/\.part$/, '') };
+        }),
+      };
+      const window = new PrefetchWindow(session, {
+        cacheFileRepo: repo,
+        segmentCount: 1,
+        getDelegate: () => delegate,
+      });
+
+      const result = await expect(
+        window.prefetchHlsAsset(PLAYLIST_URL, 1)
+      ).resolves.toMatchObject({ status: 'settled', segmentsIngested: 1 });
+
+      const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+      // the segment WAS written/promoted (repo.verifyAndPromote called for
+      // it), but never registered — no owner entry exists to register under.
+      expect(delegate.__store.get(ownerKey)).toBeUndefined();
+      void result;
+    });
+
+    it('bytes = 0 → registers without error, segmentPaths gains the path', async () => {
+      const session = createFakeSession();
+      session.dataTask.mockImplementation(async () => ({
+        data: b64(buildPlaylist(1)),
+      }));
+      const delegate = createFakeHlsDelegate();
+      const repo: FakeRepo = {
+        writeTemp: jest.fn(async (_url: string, key: string) => ({
+          tempPath: `/mock/tmp/${key}.part`,
+          contentLength: 0,
+        })),
+        verifyAndPromote: jest.fn(async (tempPath: string) => ({
+          promoted: true,
+          finalPath: tempPath.replace(/\.part$/, ''),
+        })),
+      };
+      const window = new PrefetchWindow(session, {
+        cacheFileRepo: repo,
+        segmentCount: 1,
+        getDelegate: () => delegate,
+      });
+
+      await expect(
+        window.prefetchHlsAsset(PLAYLIST_URL, 1)
+      ).resolves.toMatchObject({ status: 'settled' });
+
+      const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+      const owner = delegate.__store.get(ownerKey);
+      const playlistBytes = Buffer.byteLength(buildPlaylist(1), 'utf8');
+      expect(owner.segmentPaths).toHaveLength(1);
+      // bytes = 0 segment contributes nothing on top of the playlist bytes.
+      expect(owner.bytes).toBe(playlistBytes);
+    });
+
+    it('bytes = 1 → registers correctly', async () => {
+      const session = createFakeSession();
+      session.dataTask.mockImplementation(async () => ({
+        data: b64(buildPlaylist(1)),
+      }));
+      const delegate = createFakeHlsDelegate();
+      const repo: FakeRepo = {
+        writeTemp: jest.fn(async (_url: string, key: string) => ({
+          tempPath: `/mock/tmp/${key}.part`,
+          contentLength: 1,
+        })),
+        verifyAndPromote: jest.fn(async (tempPath: string) => ({
+          promoted: true,
+          finalPath: tempPath.replace(/\.part$/, ''),
+        })),
+      };
+      const window = new PrefetchWindow(session, {
+        cacheFileRepo: repo,
+        segmentCount: 1,
+        getDelegate: () => delegate,
+      });
+
+      await window.prefetchHlsAsset(PLAYLIST_URL, 1);
+
+      const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+      const owner = delegate.__store.get(ownerKey);
+      const playlistBytes = Buffer.byteLength(buildPlaylist(1), 'utf8');
+      expect(owner.segmentPaths).toHaveLength(1);
+      expect(owner.bytes).toBe(playlistBytes + 1);
+    });
+
+    it('very large segment sizes → CacheEntry.bytes sums across segments without overflow/truncation', async () => {
+      const session = createFakeSession();
+      session.dataTask.mockImplementation(async () => ({
+        data: b64(buildPlaylist(2)),
+      }));
+      const delegate = createFakeHlsDelegate();
+      const LARGE = 4_000_000_000; // 4GB — exceeds Int32 range
+      const repo: FakeRepo = {
+        writeTemp: jest.fn(async (_url: string, key: string) => ({
+          tempPath: `/mock/tmp/${key}.part`,
+          contentLength: LARGE,
+        })),
+        verifyAndPromote: jest.fn(async (tempPath: string) => ({
+          promoted: true,
+          finalPath: tempPath.replace(/\.part$/, ''),
+        })),
+      };
+      const window = new PrefetchWindow(session, {
+        cacheFileRepo: repo,
+        segmentCount: 2,
+        getDelegate: () => delegate,
+      });
+
+      await window.prefetchHlsAsset(PLAYLIST_URL, 2);
+
+      const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+      const owner = delegate.__store.get(ownerKey);
+      const playlistBytes = Buffer.byteLength(buildPlaylist(2), 'utf8');
+      expect(owner.segmentPaths).toHaveLength(2);
+      expect(owner.bytes).toBe(playlistBytes + LARGE * 2);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Integration: driven through the REAL CacheManager (same convention as
   // full-lifecycle.test.ts's Stage 5/7) — proves the fix end-to-end through
   // the actual PreCacheProvider.delegate wiring, not just PrefetchWindow in
@@ -567,6 +792,11 @@ describe('BUG-3 fix: prefetchHlsAsset registers its playlist via the PreCacheDel
         send(code: number, _type: string, body: string) {
           this.closed = true;
           calls.push({ method: 'send', code, body });
+        },
+        sendRaw(code: number, _type: string, base64Body: string) {
+          // already base64 — recorded verbatim, never encoded a second time
+          this.closed = true;
+          calls.push({ method: 'sendRaw', code, body: base64Body });
         },
         json(obj: any, code = 200) {
           this.closed = true;
@@ -690,5 +920,151 @@ describe('BUG-3 fix: prefetchHlsAsset registers its playlist via the PreCacheDel
       expect(res.calls[0]?.code).toBe(200);
       expect(res.calls[0]?.body).toEqual(expect.any(String));
     }, 15000);
+  });
+});
+
+// BUG-12 / UC-SlidingWindowSegmentDelivery, hypothesis (a) — CONFIRMED against
+// the live origin on 2026-08-20. The bodies below are VERBATIM captures from
+// https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8 and its lowest-bandwidth
+// variant, so this suite reproduces the real ladder rather than an idealised
+// one. Pre-fix, fetchPlaylist returned the five variant .m3u8 URIs as if they
+// were media segments: the prefetch "succeeded" having landed no video at all.
+const MUX_MASTER = `#EXTM3U
+#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=2149280,CODECS="mp4a.40.2,avc1.64001f",RESOLUTION=1280x720,NAME="720"
+url_0/193039199_mp4_h264_aac_hd_7.m3u8
+#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=246440,CODECS="mp4a.40.5,avc1.42000d",RESOLUTION=320x184,NAME="240"
+url_2/193039199_mp4_h264_aac_ld_7.m3u8
+#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=460560,CODECS="mp4a.40.5,avc1.420016",RESOLUTION=512x288,NAME="380"
+url_4/193039199_mp4_h264_aac_7.m3u8
+#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=836280,CODECS="mp4a.40.2,avc1.64001f",RESOLUTION=848x480,NAME="480"
+url_6/193039199_mp4_h264_aac_hq_7.m3u8
+#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=6221600,CODECS="mp4a.40.2,avc1.640028",RESOLUTION=1920x1080,NAME="1080"
+url_8/193039199_mp4_h264_aac_fhd_7.m3u8
+`;
+
+const MUX_VARIANT = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:10
+#EXTINF:10.000,
+url_526/193039199_mp4_h264_aac_ld_7.ts
+#EXTINF:10.000,
+url_527/193039199_mp4_h264_aac_ld_7.ts
+#EXTINF:10.000,
+url_528/193039199_mp4_h264_aac_ld_7.ts
+#EXT-X-ENDLIST
+`;
+
+const MUX_MASTER_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
+
+describe('BUG-12 — master-playlist descent (UC-SlidingWindowSegmentDelivery)', () => {
+  it('isMasterPlaylist: the real mux master is detected; its media variant is not', () => {
+    expect(isMasterPlaylist(MUX_MASTER)).toBe(true);
+    expect(isMasterPlaylist(MUX_VARIANT)).toBe(false);
+  });
+
+  it('selectVariant: picks the LOWEST advertised bandwidth (246440 → url_2), resolved absolute', () => {
+    expect(selectVariant(MUX_MASTER, MUX_MASTER_URL)).toBe(
+      'https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8'
+    );
+  });
+
+  it('selectVariant: returns null for a media playlist (no variants to choose)', () => {
+    expect(selectVariant(MUX_VARIANT, MUX_MASTER_URL)).toBeNull();
+  });
+
+  it("regression: pre-fix, the master's own non-tag lines are all .m3u8 — never media", () => {
+    // This is the defect, expressed directly: the old rule (every non-# line is
+    // a segment) yields five playlists. If this ever yields a .ts, the fixture
+    // stopped representing the real stream.
+    const preFixSegments = MUX_MASTER.split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith('#'));
+    expect(preFixSegments).toHaveLength(5);
+    expect(preFixSegments.every((u) => u.endsWith('.m3u8'))).toBe(true);
+    expect(preFixSegments.some((u) => u.endsWith('.ts'))).toBe(false);
+  });
+
+  it("fetchPlaylist descends one level: a master yields the VARIANT's .ts segments, and the master body is still what gets cached", async () => {
+    const bodies: Record<string, string> = {
+      [MUX_MASTER_URL]: MUX_MASTER,
+      'https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8':
+        MUX_VARIANT,
+    };
+    const seen: string[] = [];
+    const session = {
+      dataTask: jest.fn(async (url: string) => {
+        seen.push(url);
+        return { data: b64(bodies[url] ?? ''), headers: {} };
+      }),
+      cancelTask: jest.fn(),
+      cancelAllTask: jest.fn(),
+    } as unknown as PrefetchAwareSessionTask;
+
+    const window = new PrefetchWindow(session);
+    const result = await (window as any).fetchPlaylist(MUX_MASTER_URL);
+
+    // both levels were fetched, master first
+    expect(seen).toEqual([
+      MUX_MASTER_URL,
+      'https://test-streams.mux.dev/x36xhzz/url_2/193039199_mp4_h264_aac_ld_7.m3u8',
+    ]);
+    // Real media segments, absolute, from the VARIANT. Note the `url_2/`
+    // prefix: a relative URI resolves against the PLAYLIST that contains it
+    // (RFC 8216 §4.1), i.e. the variant's URL — not the master's. Verified
+    // against the live origin 2026-08-20:
+    //   .../x36xhzz/url_2/url_526/...ts -> 200, 272412 bytes
+    //   .../x36xhzz/url_526/...ts       -> 404
+    expect(result.segmentUrls).toEqual([
+      'https://test-streams.mux.dev/x36xhzz/url_2/url_526/193039199_mp4_h264_aac_ld_7.ts',
+      'https://test-streams.mux.dev/x36xhzz/url_2/url_527/193039199_mp4_h264_aac_ld_7.ts',
+      'https://test-streams.mux.dev/x36xhzz/url_2/url_528/193039199_mp4_h264_aac_ld_7.ts',
+    ]);
+    expect(result.segmentUrls.every((u: string) => u.endsWith('.ts'))).toBe(
+      true
+    );
+    // the cached body remains the MASTER — that is what this URL serves
+    expect(result.text).toBe(MUX_MASTER);
+  });
+
+  it('a media playlist is unchanged by the fix — exactly one fetch, no descent', async () => {
+    const seen: string[] = [];
+    const session = {
+      dataTask: jest.fn(async (url: string) => {
+        seen.push(url);
+        return { data: b64(MUX_VARIANT), headers: {} };
+      }),
+      cancelTask: jest.fn(),
+      cancelAllTask: jest.fn(),
+    } as unknown as PrefetchAwareSessionTask;
+
+    const window = new PrefetchWindow(session);
+    const result = await (window as any).fetchPlaylist(MUX_MASTER_URL);
+
+    expect(seen).toHaveLength(1);
+    expect(result.segmentUrls).toHaveLength(3);
+    expect(result.text).toBe(MUX_VARIANT);
+  });
+
+  it('a self-referential master descends at most once, then stops (no infinite loop)', async () => {
+    const seen: string[] = [];
+    const session = {
+      dataTask: jest.fn(async (url: string) => {
+        seen.push(url);
+        // every level claims to be a master pointing at itself
+        return { data: b64(MUX_MASTER), headers: {} };
+      }),
+      cancelTask: jest.fn(),
+      cancelAllTask: jest.fn(),
+    } as unknown as PrefetchAwareSessionTask;
+
+    const window = new PrefetchWindow(session);
+    const result = await (window as any).fetchPlaylist(MUX_MASTER_URL);
+
+    // master + one variant fetch, and no more
+    expect(seen).toHaveLength(2);
+    // the inner level is not descended again, so its non-tag lines come back
+    // as-is rather than recursing forever
+    expect(result.segmentUrls).toHaveLength(5);
   });
 });

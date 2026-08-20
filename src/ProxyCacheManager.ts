@@ -125,7 +125,10 @@ import { bumpGeneration, getGeneration } from './Libs/pinGenerationGuard';
 // TASK-007/008 (round-ledger D4): CacheFileRepository (TASK-006,
 // pin-generation-guard scope substrate) is now import-ready — the
 // writeTemp/verifyAndPromote seams below are no longer BLOCKED.
-import { CacheFileRepository } from './Libs/verifiedWrite';
+import {
+  CacheFileRepository,
+  OriginStatusRejectedError,
+} from './Libs/verifiedWrite';
 
 // - MARK: Asset registry v2 (TASK-004, UC-IngestHlsPlaylist/UC-EvictCacheAsset)
 // `version: 2` is the first version-tagged persisted-registry format — any
@@ -151,6 +154,24 @@ export const REGISTRY_UPGRADED_EVENT = 'RNCV_REGISTRY_UPGRADED';
 // "test/diagnostics only", never player-consumed).
 export const CACHE_STATUS_EVENT = 'RNCV_CACHE_STATUS';
 export type CacheStatus = 'HIT' | 'MISS' | 'STALE-FALLBACK';
+
+/**
+ * True only for a well-formed absolute http(s) URL — what every transport in
+ * this library assumes it is given. Deliberately strict and total: it never
+ * throws, so it is safe as the very first gate on an attacker-or-typo-supplied
+ * `__hls_origin_url` value.
+ */
+export function isAbsoluteHttpUrl(candidate: string): boolean {
+  try {
+    // the polyfill, matching Utils/cacheKeyPolicy — not the ambient global,
+    // whose availability differs across RN versions and platforms
+    const { URL: PolyfilledURL } = require('react-native-url-polyfill');
+    const parsed = new PolyfilledURL(candidate);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 export class CacheManager
   implements PreCacheDelegate, MemoryCacheDelegate<any>
@@ -766,6 +787,19 @@ export class CacheManager
             return res.send(400, 'text/plain', 'Bad Request');
           }
 
+          // R1/R10 — reject a malformed origin HERE, before any transport
+          // touches it. Measured on an iOS simulator: `__hls_origin_url=%` and
+          // `__hls_origin_url=not-a-url` both reached react-native-blob-util,
+          // whose promise then NEVER SETTLED — so no handler ever called
+          // respond(), the GCDWebServer completion block never fired, and the
+          // request hung until the client timed out (8s+, no bytes). A hang is
+          // worse than an error: the player has no way to recover. Every other
+          // error path already answers fast (missing param 400, CDN 404,
+          // unreachable host 500) — this closes the one that did not.
+          if (!isAbsoluteHttpUrl(urlStr)) {
+            return res.send(400, 'text/plain', 'Bad Request');
+          }
+
           const filePath = CacheKeyPolicy.filePathFor(
             urlStr,
             this.cacheFolder,
@@ -865,7 +899,7 @@ export class CacheManager
         const port = this.runningPort!;
         const cachedBody = reverseProxyPlaylist(rawBase64, forUrl, port);
         this.emitCacheStatus(key, 'STALE-FALLBACK');
-        reverseRes.send(200, HLS_CONTENT_TYPE, cachedBody);
+        reverseRes.sendRaw(200, HLS_CONTENT_TYPE, cachedBody);
         return;
       }
     }
@@ -955,12 +989,13 @@ export class CacheManager
       let finalPath: string | null;
       try {
         await this._storage.write(tempPath, originText, 'utf8');
-        finalPath = await this._cacheFileRepo.verifyAndPromote(
+        const promoteResult = await this._cacheFileRepo.verifyAndPromote(
           tempPath,
           contentLength,
           key,
           generation
         );
+        finalPath = promoteResult.finalPath;
       } catch (writeError) {
         return reverseRes.send(500, 'text/plain', 'WRITE_FAILED');
       }
@@ -980,7 +1015,7 @@ export class CacheManager
       this.registerHlsOwner(key, finalPath, contentLength);
       this.emitCacheStatus(key, 'MISS');
 
-      return reverseRes.send(
+      return reverseRes.sendRaw(
         response.respInfo?.status ?? 200,
         contentTypeOf(response.respInfo?.headers, HLS_CONTENT_TYPE),
         playlistStr
@@ -1037,7 +1072,7 @@ export class CacheManager
             if (ownerKey) {
               this.registerSegmentUnderOwner(ownerKey, absFilePath, streamData);
             }
-            return reverseRes.send(200, HLS_VIDEO_TYPE, streamData);
+            return reverseRes.sendRaw(200, HLS_VIDEO_TYPE, streamData);
           }
 
           const owner = ownerKey ? this._memoryCache?.get(ownerKey) : undefined;
@@ -1066,35 +1101,86 @@ export class CacheManager
           let tempPath: string;
           let contentLength: number | null;
           let rawBody: string;
+          let originStatus: number;
+          let originContentRange: string | undefined;
           try {
+            // TASK-003 (UC-RangedSegmentCacheWrite): forward the request
+            // headers (Range in particular) so writeTemp derives the same
+            // range-suffixed path the read path already uses (INV-01), and
+            // capture the origin's real status for the response below.
             const tempResult = await this._cacheFileRepo.writeTemp(
               forUrl,
-              ownerKey
+              ownerKey,
+              { headers }
             );
             tempPath = tempResult.tempPath;
             contentLength = tempResult.contentLength;
+            originStatus = tempResult.status;
+            originContentRange = tempResult.contentRange;
             rawBody = await systemStorage.read(tempPath, 'base64');
           } catch (fetchError) {
             return reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');
           }
 
-          const finalPath = await this._cacheFileRepo.verifyAndPromote(
-            tempPath,
-            contentLength,
-            ownerKey,
-            generation
-          );
+          let promoteResult;
+          try {
+            // TASK-003 (UC-OriginErrorRejection): pass the origin's real
+            // status so a non-2xx body (TASK-002's gate) is rejected before
+            // it can be mistaken for verified media.
+            promoteResult = await this._cacheFileRepo.verifyAndPromote(
+              tempPath,
+              contentLength,
+              ownerKey,
+              generation,
+              originStatus
+            );
+          } catch (originError) {
+            if (originError instanceof OriginStatusRejectedError) {
+              // Non-2xx origin response passed through with its real
+              // status, not synthesized as 500 — nothing was promoted.
+              return reverseRes.send(
+                originError.status,
+                'text/plain',
+                'ORIGIN_ERROR'
+              );
+            }
+            return reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');
+          }
 
-          if (finalPath === null) {
+          // UC-RangedSegmentCacheWrite Step 7 (0.5.0): thread the origin's
+          // Content-Range back to the player alongside its status. Without it
+          // a 206 is unusable — a player that asked for a range and gets a 206
+          // with no Content-Range cannot place the bytes, so seeking breaks.
+          // Only sent when the origin actually supplied one (i.e. a genuine
+          // ranged response); a plain 200 keeps exactly its pre-0.5.0 headers.
+          const rangeHeaders = originContentRange
+            ? { 'Content-Range': originContentRange }
+            : undefined;
+
+          if (promoteResult.finalPath === null) {
             // AssetDiscarded — the player still needs its bytes for THIS
             // request now; only the registration under the owner is
             // skipped (per TASK-008's implementation note).
-            return reverseRes.send(200, HLS_VIDEO_TYPE, rawBody);
+            return reverseRes.sendRaw(
+              originStatus,
+              HLS_VIDEO_TYPE,
+              rawBody,
+              rangeHeaders
+            );
           }
 
-          this.registerSegmentUnderOwner(ownerKey, finalPath, rawBody);
+          this.registerSegmentUnderOwner(
+            ownerKey,
+            promoteResult.finalPath,
+            rawBody
+          );
 
-          return reverseRes.send(200, HLS_VIDEO_TYPE, rawBody);
+          return reverseRes.sendRaw(
+            originStatus,
+            HLS_VIDEO_TYPE,
+            rawBody,
+            rangeHeaders
+          );
         } catch (innerError) {
           if (reverseRes.closed !== true) {
             reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');

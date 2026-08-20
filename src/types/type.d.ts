@@ -13,7 +13,20 @@ export interface RequestInterface {
 export interface ResponseInterface {
   requestId: string;
   closed: boolean;
-  send(code: number, type: string, body: string): void;
+  /** Body is PLAIN TEXT; it is base64-encoded for the native bridge. */
+  send(
+    code: number,
+    type: string,
+    body: string,
+    headers?: { [key in string]: string }
+  ): void;
+  /** Body is ALREADY base64 (media off disk, reverseProxyPlaylist output). */
+  sendRaw(
+    code: number,
+    type: string,
+    base64Body: string,
+    headers?: { [key in string]: string }
+  ): void;
   json(obj: any, code?: number): void;
   html(html: string, code?: number): void;
 }

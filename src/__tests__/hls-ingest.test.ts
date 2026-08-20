@@ -60,6 +60,11 @@ function mockResponse() {
       this.closed = true;
       calls.push({ method: 'send', code, body });
     },
+    sendRaw(code: number, _type: string, base64Body: string) {
+      // already base64 — recorded verbatim, never encoded a second time
+      this.closed = true;
+      calls.push({ method: 'sendRaw', code, body: base64Body });
+    },
     json(obj: any, code = 200) {
       this.closed = true;
       calls.push({ method: 'json', code, body: JSON.stringify(obj) });

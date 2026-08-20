@@ -154,7 +154,8 @@ describe('UC-RemoveCacheAsset — Test Surface', () => {
     );
 
     // asset stays absent — stale generation rejected, never promoted
-    expect(promoted).toBeNull();
+    expect(promoted.promoted).toBe(false);
+    expect(promoted.finalPath).toBeNull();
     expect(BlobUtilMock.__hasFile(finalPath)).toBe(false);
     expect(manager.getCachedFile(URL)).toBeUndefined();
   });

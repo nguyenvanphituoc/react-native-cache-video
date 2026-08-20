@@ -1,5 +1,8 @@
 import { URL } from 'react-native-url-polyfill';
-import { getExtensionIfNeed, hashFileName, isNull } from './util';
+// TASK-009 (UC-CleanModuleBoundary): import from the leaf module, not
+// `util.ts` — `util.ts` imports `CacheKeyPolicy` for `cacheKey()`, so
+// importing back from `util.ts` here was the require cycle.
+import { getExtensionIfNeed, hashFileName, isNull } from './pathPrimitives';
 
 // UC-NormalizeCacheKey — the single place every cache-key / disk-file-path
 // derivation goes through. Replaces the two independent, buggy derivations

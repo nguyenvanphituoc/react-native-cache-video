@@ -2,8 +2,14 @@
  * TASK-006 — generalized verified-write path (temp/verify/promote) with
  * generation check (src/Libs/verifiedWrite.ts, CacheFileRepository,
  * [[contracts/cache-file-store.contract]]).
+ * TASK-001/TASK-002 (round 4) — writeTemp header/range widening (BUG-9) and
+ * verifyAndPromote's origin-status rejection gate (BUG-11).
  */
-import { CacheFileRepository, contentLengthOf } from '../Libs/verifiedWrite';
+import {
+  CacheFileRepository,
+  contentLengthOf,
+  OriginStatusRejectedError,
+} from '../Libs/verifiedWrite';
 import { SimpleSessionProvider } from '../Libs/session';
 import {
   FileBucket,
@@ -89,18 +95,18 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
 
     const result = await repo.verifyAndPromote(tempPath, 1000, KEY, 0);
 
-    expect(result).toBe(finalPath);
+    expect(result).toEqual({ promoted: true, finalPath });
     expect(BlobUtilMock.fs.mv).toHaveBeenCalledWith(tempPath, finalPath);
     expect(BlobUtilMock.__hasFile(finalPath)).toBe(true);
     expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
   });
 
-  it('TS-ERR-SIZE_MISMATCH: size === contentLength − 1 → discarded (null), temp deleted, never promoted', async () => {
+  it('TS-ERR-SIZE_MISMATCH: size === contentLength − 1 → discarded (not promoted), temp deleted, never promoted', async () => {
     BlobUtilMock.__seedFile(tempPath, 'v'.repeat(999));
 
     const result = await repo.verifyAndPromote(tempPath, 1000, KEY, 0);
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ promoted: false, finalPath: null });
     expect(BlobUtilMock.fs.mv).not.toHaveBeenCalled();
     expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
     expect(BlobUtilMock.__hasFile(finalPath)).toBe(false);
@@ -111,7 +117,7 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
 
     const result = await repo.verifyAndPromote(tempPath, 1000, KEY, 0);
 
-    expect(result).toBe(finalPath);
+    expect(result).toEqual({ promoted: true, finalPath });
   });
 
   it('BUG-6 regression: re-ingesting the same key (finalPath already on disk from a prior promote — second-session replay) still promotes cleanly, single final file with the new bytes', async () => {
@@ -123,7 +129,7 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
       KEY,
       0
     );
-    expect(first).toBe(finalPath);
+    expect(first).toEqual({ promoted: true, finalPath });
     expect(BlobUtilMock.__getFile(finalPath)).toBe('first-ingest-bytes');
 
     // second ingest of the SAME key: finalPath already exists on disk —
@@ -138,7 +144,7 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
       0
     );
 
-    expect(second).toBe(finalPath);
+    expect(second).toEqual({ promoted: true, finalPath });
     expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
     // single final file, holding the NEW bytes — not a stale leftover of
     // the first promote, not a throw from the second.
@@ -152,7 +158,7 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
 
     const result = await repo.verifyAndPromote(tempPath, null, KEY, 0);
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ promoted: false, finalPath: null });
     expect(BlobUtilMock.fs.mv).not.toHaveBeenCalled();
     expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
   });
@@ -175,7 +181,7 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
     // caller supplies the STALE generation (0) it captured at download start
     const result = await repo.verifyAndPromote(tempPath, 1000, KEY, 0);
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ promoted: false, finalPath: null });
     expect(BlobUtilMock.fs.mv).not.toHaveBeenCalled(); // atomic move NEVER attempted
     expect(BlobUtilMock.__hasFile(finalPath)).toBe(false);
     expect(BlobUtilMock.__hasFile(tempPath)).toBe(false); // discarded
@@ -189,8 +195,8 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
     // When verifyAndPromote is called with a generation older than current
     const result = await repo.verifyAndPromote(tempPath, 42, KEY, 0);
 
-    // Then the result is null, temp deleted, final path never written
-    expect(result).toBeNull();
+    // Then the result is not promoted, temp deleted, final path never written
+    expect(result).toEqual({ promoted: false, finalPath: null });
     expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
     expect(BlobUtilMock.__hasFile(finalPath)).toBe(false);
   });
@@ -208,7 +214,7 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
 
     const result = await repo.verifyAndPromote(tempPath, threeGB, KEY, 0);
 
-    expect(result).toBe(finalPath);
+    expect(result).toEqual({ promoted: true, finalPath });
     expect(BlobUtilMock.fs.mv).toHaveBeenCalledWith(tempPath, finalPath);
   });
 
@@ -232,6 +238,249 @@ describe('CacheFileRepository — writeTemp/verifyAndPromote (TASK-006)', () => 
     BlobUtilMock.__seedFile(path, 'v'.repeat(77));
 
     await expect(repo.statBytes(path)).resolves.toBe(77);
+  });
+});
+
+describe('CacheFileRepository.writeTemp — headers/range widening (TASK-001, UC-RangedSegmentCacheWrite)', () => {
+  let repo: CacheFileRepository;
+  let storage: FileSystemManager;
+  let finalPath: string;
+
+  beforeEach(() => {
+    resetTestHarness();
+    __resetPinGenerationGuardForTests();
+    storage = new FileSystemManager();
+    repo = new CacheFileRepository(new SimpleSessionProvider(), storage);
+    finalPath = CacheKeyPolicy.filePathFor(
+      ORIGIN_URL,
+      storage.getBucketFolder(FileBucket.cache),
+      KEY_PREFIX
+    );
+  });
+
+  const configuredPaths = () =>
+    BlobUtilMock.config.mock.calls
+      .map(([options]: any[]) => options)
+      .filter((options: any) => options && options.path);
+
+  it('ranged request (Range: bytes=0-524287) → file lands at the range-suffixed path, origin call receives the Range header, WriteTempResult carries status + contentRange', async () => {
+    BlobUtilMock.__setFetchResponse({
+      data: 'v'.repeat(10),
+      status: 206,
+      headers: {
+        'Content-Length': '10',
+        'Content-Range': 'bytes 0-524287/10485760',
+      },
+    });
+
+    const result = await repo.writeTemp(ORIGIN_URL, KEY, {
+      headers: { Range: 'bytes=0-524287' },
+    });
+
+    const expectedFinal = finalPath.replace(
+      /\.[^/.]+$/,
+      (ext) => `-0-524287${ext}`
+    );
+    expect(result.tempPath).toBe(tempCachePathFor(expectedFinal));
+    expect(result.status).toBe(206);
+    expect(result.contentRange).toBe('bytes 0-524287/10485760');
+    const configs = configuredPaths();
+    expect(configs).toHaveLength(1);
+    expect(configs[0].path).toBe(tempCachePathFor(expectedFinal));
+    expect(configs[0].headers).toEqual({ Range: 'bytes=0-524287' });
+  });
+
+  it('opts omitted (existing 2-arg call sites) → behaves byte-identically to pre-fix: un-suffixed path, no headers forwarded (TS-INV-02)', async () => {
+    BlobUtilMock.__setFetchResponse({
+      data: 'v'.repeat(10),
+      headers: { 'Content-Length': '10' },
+    });
+
+    const result = await repo.writeTemp(ORIGIN_URL, KEY);
+
+    expect(result.tempPath).toBe(tempCachePathFor(finalPath));
+    expect(result.status).toBe(200);
+    const configs = configuredPaths();
+    expect(configs[0].path).toBe(tempCachePathFor(finalPath));
+    expect(configs[0].headers).toBeUndefined();
+  });
+
+  it('opts.headers present but has no Range key → non-ranged behavior, un-suffixed path', async () => {
+    BlobUtilMock.__setFetchResponse({
+      data: 'v'.repeat(10),
+      headers: { 'Content-Length': '10' },
+    });
+
+    const result = await repo.writeTemp(ORIGIN_URL, KEY, {
+      headers: { 'X-Custom': 'value' },
+    });
+
+    expect(result.tempPath).toBe(tempCachePathFor(finalPath));
+    const configs = configuredPaths();
+    expect(configs[0].headers).toEqual({ 'X-Custom': 'value' });
+  });
+
+  it('Range: bytes=0-0 (minimum single-byte span) → accepted, suffixed correctly', async () => {
+    BlobUtilMock.__setFetchResponse({
+      data: 'v',
+      status: 206,
+      headers: { 'Content-Length': '1' },
+    });
+
+    const result = await repo.writeTemp(ORIGIN_URL, KEY, {
+      headers: { Range: 'bytes=0-0' },
+    });
+
+    const expectedFinal = finalPath.replace(/\.[^/.]+$/, (ext) => `-0-0${ext}`);
+    expect(result.tempPath).toBe(tempCachePathFor(expectedFinal));
+  });
+
+  // `absoluteFilePath`'s existing regex (`bytes=(\d+)-(\d+)`, reused
+  // verbatim per TASK-001's implementation notes) requires both an offset
+  // AND a length capture group — an open-ended range has no closing digit,
+  // so it does not match and falls back to the un-suffixed path, same as a
+  // malformed value. This keeps the write path and the (already-correct)
+  // read path deriving the SAME path for this input either way (INV-01).
+  it("Range: bytes=0- (open-ended) → handled per absoluteFilePath's existing regex — no crash, path matches the read side", async () => {
+    BlobUtilMock.__setFetchResponse({
+      data: 'v'.repeat(10),
+      headers: { 'Content-Length': '10' },
+    });
+
+    const result = await repo.writeTemp(ORIGIN_URL, KEY, {
+      headers: { Range: 'bytes=0-' },
+    });
+
+    expect(result.tempPath).toBe(tempCachePathFor(finalPath));
+  });
+
+  it('Malformed Range: bytes=abc → falls back to un-suffixed, non-ranged path — no crash, no thrown error', async () => {
+    BlobUtilMock.__setFetchResponse({
+      data: 'v'.repeat(10),
+      headers: { 'Content-Length': '10' },
+    });
+
+    await expect(
+      repo.writeTemp(ORIGIN_URL, KEY, { headers: { Range: 'bytes=abc' } })
+    ).resolves.toEqual(
+      expect.objectContaining({ tempPath: tempCachePathFor(finalPath) })
+    );
+  });
+});
+
+describe('CacheFileRepository.verifyAndPromote — origin-status gate (TASK-002, UC-OriginErrorRejection, BUG-11)', () => {
+  let repo: CacheFileRepository;
+  let storage: FileSystemManager;
+  let finalPath: string;
+  let tempPath: string;
+
+  beforeEach(() => {
+    resetTestHarness();
+    __resetPinGenerationGuardForTests();
+    storage = new FileSystemManager();
+    repo = new CacheFileRepository(new SimpleSessionProvider(), storage);
+    finalPath = CacheKeyPolicy.filePathFor(
+      ORIGIN_URL,
+      storage.getBucketFolder(FileBucket.cache),
+      KEY_PREFIX
+    );
+    tempPath = tempCachePathFor(finalPath);
+  });
+
+  it('mock 403 origin response with matching Content-Length → not promoted, real status surfaced (not masked as 500)', async () => {
+    BlobUtilMock.__seedFile(tempPath, 'cloud_name disabled'.padEnd(33, ' '));
+
+    await expect(
+      repo.verifyAndPromote(tempPath, 33, KEY, 0, 403)
+    ).rejects.toMatchObject({
+      name: 'OriginStatusRejectedError',
+      status: 403,
+    });
+    expect(BlobUtilMock.fs.mv).not.toHaveBeenCalled();
+    expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
+    expect(BlobUtilMock.__hasFile(finalPath)).toBe(false);
+  });
+
+  // TS-ERR-RANGE_NOT_SATISFIABLE (UC-RangedSegmentCacheWrite). 416 is the one
+  // range-specific origin rejection: the player asked for an offset past the
+  // end of the content. It must pass through with its real status and leave
+  // nothing at the range-suffixed path — otherwise a later identical request
+  // reads back an error body as if it were media.
+  it('mock 416 RANGE_NOT_SATISFIABLE → passed through with its real status, nothing written at the range-suffixed path', async () => {
+    // same suffix derivation the writeTemp range tests above use — a fully
+    // bounded range, since that is what absoluteFilePath's regex suffixes
+    const rangedFinalPath = finalPath.replace(
+      /\.[^/.]+$/,
+      (ext) => `-99999999-100000000${ext}`
+    );
+    const rangedTempPath = tempCachePathFor(rangedFinalPath);
+    BlobUtilMock.__seedFile(rangedTempPath, 'Range Not Satisfiable');
+
+    await expect(
+      repo.verifyAndPromote(rangedTempPath, 21, KEY, 0, 416)
+    ).rejects.toMatchObject({
+      name: 'OriginStatusRejectedError',
+      status: 416,
+    });
+
+    // never promoted, and no partial left behind at either path
+    expect(BlobUtilMock.fs.mv).not.toHaveBeenCalled();
+    expect(BlobUtilMock.__hasFile(rangedTempPath)).toBe(false);
+    expect(BlobUtilMock.__hasFile(rangedFinalPath)).toBe(false);
+    // and the un-suffixed path is untouched — a failed range must not
+    // invalidate or shadow the whole-file entry
+    expect(BlobUtilMock.__hasFile(finalPath)).toBe(false);
+  });
+
+  it('originStatus omitted (existing callers not yet migrated) → treated as 2xx for backward compatibility, promotes exactly as before', async () => {
+    BlobUtilMock.__seedFile(tempPath, 'v'.repeat(10));
+
+    const result = await repo.verifyAndPromote(tempPath, 10, KEY, 0);
+
+    expect(result).toEqual({ promoted: true, finalPath });
+  });
+
+  it('originStatus = 199 → rejected', async () => {
+    BlobUtilMock.__seedFile(tempPath, 'v'.repeat(10));
+
+    await expect(
+      repo.verifyAndPromote(tempPath, 10, KEY, 0, 199)
+    ).rejects.toBeInstanceOf(OriginStatusRejectedError);
+  });
+
+  it('originStatus = 200 → promoted', async () => {
+    BlobUtilMock.__seedFile(tempPath, 'v'.repeat(10));
+
+    const result = await repo.verifyAndPromote(tempPath, 10, KEY, 0, 200);
+
+    expect(result).toEqual({ promoted: true, finalPath });
+  });
+
+  it('originStatus = 299 → promoted', async () => {
+    BlobUtilMock.__seedFile(tempPath, 'v'.repeat(10));
+
+    const result = await repo.verifyAndPromote(tempPath, 10, KEY, 0, 299);
+
+    expect(result).toEqual({ promoted: true, finalPath });
+  });
+
+  it('originStatus = 300 → rejected', async () => {
+    BlobUtilMock.__seedFile(tempPath, 'v'.repeat(10));
+
+    await expect(
+      repo.verifyAndPromote(tempPath, 10, KEY, 0, 300)
+    ).rejects.toBeInstanceOf(OriginStatusRejectedError);
+  });
+
+  it('after a rejected write, no file remains at temp OR final path (TS-INV-02 on UC-OriginErrorRejection)', async () => {
+    BlobUtilMock.__seedFile(tempPath, 'v'.repeat(10));
+
+    await expect(
+      repo.verifyAndPromote(tempPath, 10, KEY, 0, 500)
+    ).rejects.toBeInstanceOf(OriginStatusRejectedError);
+
+    expect(BlobUtilMock.__hasFile(tempPath)).toBe(false);
+    expect(BlobUtilMock.__hasFile(finalPath)).toBe(false);
   });
 });
 

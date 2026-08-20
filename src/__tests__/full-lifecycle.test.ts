@@ -54,7 +54,7 @@ import { LFUSizePolicy } from '../Provider/MemoryCacheLFUSizePolicy';
 import { tempCachePathFor } from '../Libs/fileSystem';
 import { KEY_PREFIX } from '../Utils/constants';
 import * as CacheKeyPolicy from '../Utils/cacheKeyPolicy';
-import { getOriginURL, reverseProxyURL } from '../Utils/util';
+import { absoluteFilePath, getOriginURL, reverseProxyURL } from '../Utils/util';
 import { recordEvents, resetTestHarness } from '../__mock__/harness';
 import BlobUtilMock from '../__mock__/react-native-blob-util';
 import NativeProxyMock from '../__mock__/native-cache-video-http-proxy';
@@ -82,13 +82,36 @@ function playlist(segmentNames: string[]): string {
 // minimal ResponseInterface double — records every send/json/html call and
 // flips `closed`, matching the real Response class's contract.
 function mockResponse() {
-  const calls: Array<{ method: string; code: number; body?: string }> = [];
+  const calls: Array<{
+    method: string;
+    code: number;
+    body?: string;
+    headers?: { [key in string]: string };
+  }> = [];
   return {
     requestId: 'test-request',
     closed: false,
-    send(code: number, _type: string, body: string) {
+    send(
+      code: number,
+      _type: string,
+      body: string,
+      headers?: { [key in string]: string }
+    ) {
       this.closed = true;
-      calls.push({ method: 'send', code, body });
+      calls.push({ method: 'send', code, body, headers });
+    },
+    // Recorded under a DISTINCT method name so a test can tell which path a
+    // handler took. Routing an already-base64 body through `send` is the
+    // double-encoding defect found on the simulator; asserting the method
+    // makes that visible in jest instead of only at runtime.
+    sendRaw(
+      code: number,
+      _type: string,
+      base64Body: string,
+      headers?: { [key in string]: string }
+    ) {
+      this.closed = true;
+      calls.push({ method: 'sendRaw', code, body: base64Body, headers });
     },
     json(obj: any, code = 200) {
       this.closed = true;
@@ -201,7 +224,15 @@ describe('Stage 1 — signed-URL rotation cache hit, through the REAL bridge ser
       manager.cacheFolder,
       KEY_PREFIX
     );
-    BlobUtilMock.__seedFile(cachedPath, 'CACHED-SEGMENT-BYTES');
+    // Seeded as BASE64 on purpose. The disk-hit path serves the file through
+    // readStream(path,'base64'), which on a real device returns base64 — and
+    // that body goes to the bridge via sendRaw (already-encoded), NOT send.
+    // The mock returns stored content verbatim, so storing base64 here is what
+    // makes it behave like the real reader.
+    BlobUtilMock.__seedFile(
+      cachedPath,
+      Buffer.from('CACHED-SEGMENT-BYTES', 'utf8').toString('base64')
+    );
 
     const emit = (originUrl: string) => {
       const proxied = new URL(reverseProxyURL(originUrl, port));
@@ -227,7 +258,12 @@ describe('Stage 1 — signed-URL rotation cache hit, through the REAL bridge ser
     expect(NativeProxyMock.respond).toHaveBeenCalledTimes(2);
     for (const call of (NativeProxyMock.respond as jest.Mock).mock.calls) {
       expect(call[1]).toBe(200);
-      expect(call[3]).toBe('CACHED-SEGMENT-BYTES');
+      // TASK-010 update: TASK-005 (BUG-8) base64-encodes every Response.send
+      // body unconditionally now (src/Libs/httpProxy.ts) — decode before
+      // comparing, matching the real native-bridge contract.
+      expect(Buffer.from(call[3], 'base64').toString('utf8')).toBe(
+        'CACHED-SEGMENT-BYTES'
+      );
     }
   });
 });
@@ -678,6 +714,7 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
     const PLAYLIST_URL =
       'https://cdn.example.com/videos/lifecycle-prefetch/index.m3u8';
     const SEG0 = 'https://cdn.example.com/videos/lifecycle-prefetch/seg0.ts';
+    const SEG1 = 'https://cdn.example.com/videos/lifecycle-prefetch/seg1.ts';
     const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST_URL);
     const seg0Path = CacheKeyPolicy.filePathFor(
       SEG0,
@@ -723,7 +760,13 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
     const ownerAfterPrefetch = manager.memoryCache?.get(ownerKey) as any;
     expect(ownerAfterPrefetch.kind).toBe('hls');
     expect(typeof ownerAfterPrefetch.playlistPath).toBe('string');
-    expect(ownerAfterPrefetch.segmentPaths).toEqual([]); // segments aren't (re)registered by the prefetch itself
+    // TASK-010 (UC-PrefetchSegmentRegistration INV-01/INV-02): FLIPPED from
+    // the pre-BUG-10-fix `toEqual([])` — a segment already written to disk
+    // by the prefetch engine (seg0Path exists, per the waitFor above) is
+    // now reachable from the owner's segmentPaths BEFORE playback ever
+    // starts, not only after a request is served through addSegmentHandler.
+    expect(ownerAfterPrefetch.segmentPaths.length).toBeGreaterThan(0);
+    expect(ownerAfterPrefetch.segmentPaths).toContain(seg0Path);
     expect(ownerAfterPrefetch.bytes).toBeGreaterThan(0);
 
     // Now simulate PLAYBACK actually starting: the playlist is ingested for
@@ -740,7 +783,12 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
       playRes
     );
     const ownerAfterPlaylistOnly = manager.memoryCache?.get(ownerKey) as any;
-    expect(ownerAfterPlaylistOnly.segmentPaths).toEqual([]);
+    // TASK-010 flip (same INV-02 premise as above): registerHlsOwner's
+    // re-ingest branch (ProxyCacheManager.ts) only refreshes `playlistPath`
+    // on an existing `hls` owner — it leaves `segmentPaths` untouched — so
+    // the segment the prefetch already registered survives this playlist
+    // re-fetch; it does NOT reset to empty.
+    expect(ownerAfterPlaylistOnly.segmentPaths).toContain(seg0Path);
     const bytesAfterPlaylistOnly = ownerAfterPlaylistOnly.bytes;
 
     // The player now requests the already-prefetched segment.
@@ -758,15 +806,34 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
     );
 
     // D6, part 2 (R2/R3 byte-accounting blind spot — CLOSED, BUG-2 fix):
-    // addSegmentHandler's disk-first branch now registers the served file
-    // under its owner when one exists (ProxyCacheManager.ts, addSegmentHandler
-    // disk-hit branch), even though this exact segment was never registered
-    // by a prior request — no longer a silent blind spot, this is a real
-    // (idempotent) registration, verified below by the populated
-    // segmentPaths/bytes.
+    // addSegmentHandler's disk-first branch registers the served file under
+    // its owner when one exists (ProxyCacheManager.ts, addSegmentHandler
+    // disk-hit branch). TASK-010 update: with BUG-10 fixed, this segment was
+    // ALREADY registered by the prefetch itself (see ownerAfterPrefetch
+    // above) — registerSegmentUnderOwner's `includes` guard makes this serve
+    // an idempotent no-op (segmentPaths/bytes unchanged), not a first-ever
+    // registration; the byte-accounting gap this closes now shows up only
+    // for a segment the prefetch never reached (the disk-hit branch is still
+    // live for that case, just not exercised by this already-prefetched
+    // segment).
     const ownerAfterServe = manager.memoryCache?.get(ownerKey) as any;
-    expect(ownerAfterServe.segmentPaths).toEqual([seg0Path]); // NOW visible to the registry
-    expect(ownerAfterServe.bytes).toBeGreaterThan(bytesAfterPlaylistOnly); // byte accounting moved
+    // The window was warmed with segmentCount: 2, so the prefetch registered
+    // BOTH seg0 and seg1 before playback — idempotency is "the serve changed
+    // nothing", not "exactly one path is listed". Asserting a hard-coded
+    // single-element array here contradicted this stage's own setup.
+    const seg1Path = CacheKeyPolicy.filePathFor(
+      SEG1,
+      manager.cacheFolder,
+      KEY_PREFIX
+    );
+    expect(ownerAfterServe.segmentPaths).toEqual(
+      ownerAfterPlaylistOnly.segmentPaths
+    );
+    expect(ownerAfterServe.segmentPaths).toEqual([seg0Path, seg1Path]);
+    expect(new Set(ownerAfterServe.segmentPaths).size).toBe(
+      ownerAfterServe.segmentPaths.length
+    ); // no duplicate from the serve
+    expect(ownerAfterServe.bytes).toBe(bytesAfterPlaylistOnly); // already accounted by the prefetch — idempotent
 
     // D6, part 3 (R2/R3 consequence — CLOSED, BUG-2 fix): the owner's
     // registry entry now DOES account for this segment, so removing the
@@ -829,7 +896,10 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
     // respondWithCachedPlaylistOrError, so this now gets the SAME 200
     // STALE-FALLBACK Stage 5's already-played asset gets, not a 502.
     expect(res.calls).toHaveLength(1);
-    expect(res.calls[0]?.method).toBe('send');
+    // sendRaw, not send: the stale-fallback body comes from
+    // reverseProxyPlaylist, which returns BASE64. Routing it through `send`
+    // would encode it a second time and hand the player base64 text.
+    expect(res.calls[0]?.method).toBe('sendRaw');
     expect(res.calls[0]?.code).toBe(200);
 
     // BUG-4 FIXED — CONFIRMED (r3-a2): the file on disk for a prefetch-only
@@ -871,6 +941,275 @@ describe('Stage 7 — a prefetched item plays from cache; the D6 registry-visibi
       expect(getOriginURL(reqPath, PORT)).toBe(SEG0);
     }
   }, 15000);
+});
+
+// ---------------------------------------------------------------------------
+// Stage 8 — ranged-segment-round-trip: a byte-range request lands on a
+// range-suffixed path with a 206 response, and an identical second request
+// is a genuine disk hit (TASK-010, UC-RangedSegmentCacheWrite, BUG-9
+// regression net; stage-ranged-segment-round-trip).
+// ---------------------------------------------------------------------------
+describe('Stage 8 — ranged-segment-round-trip (stage-ranged-segment-round-trip, UC-RangedSegmentCacheWrite)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+  });
+
+  it('a Range request writes to a range-suffixed path and responds 206; an identical second request is served from disk with no re-fetch', async () => {
+    const manager = new CacheManager('lifecycle-ranged-segment', true);
+    manager.enableMemoryCache(new FreePolicy());
+    await manager.enableBridgeServer(52111);
+
+    // addSegmentHandler's disk-miss branch only proceeds past
+    // OWNER_ASSET_MISSING once an owner is registered (`_lastHlsOwnerKey`)
+    // — ingest the playlist first, matching every other segment-serving
+    // stage's own convention (Stage 1/2/7).
+    const PLAYLIST_URL =
+      'https://cdn.example.com/videos/lifecycle-ranged/index.m3u8';
+    await ingestHlsAsset(manager, PLAYLIST_URL, []);
+
+    const SEG_URL = 'https://cdn.example.com/videos/lifecycle-ranged/seg0.ts';
+    const basePath = CacheKeyPolicy.filePathFor(
+      SEG_URL,
+      manager.cacheFolder,
+      KEY_PREFIX
+    );
+    const RANGE = 'bytes=0-9';
+    const suffixedPath = absoluteFilePath(basePath, { Range: RANGE });
+    // genuinely range-suffixed — the same derivation the write path and a
+    // later ranged read both use (INV-01).
+    expect(suffixedPath).not.toBe(basePath);
+
+    const payload = 'ranged-bytes';
+    BlobUtilMock.__setFetchResponse({
+      status: 206,
+      data: b64(payload),
+      headers: {
+        'Content-Length': String(b64(payload).length),
+        'Content-Range': `bytes 0-9/${payload.length}`,
+      },
+    });
+
+    // 1. first Range request — real origin fetch, 206, lands at the
+    // range-suffixed path (not the bare segment path).
+    const firstRes = mockResponse();
+    await (manager as any).addSegmentHandler(
+      SEG_URL,
+      basePath,
+      { Range: RANGE },
+      firstRes
+    );
+    await waitForResponse(firstRes);
+    expect(firstRes.calls[0]?.code).toBe(206);
+    expect(BlobUtilMock.__hasFile(suffixedPath)).toBe(true);
+    // Step 7 (0.5.0): the origin's Content-Range reaches the player. A 206
+    // WITHOUT this header is unusable — the player cannot place the bytes it
+    // just received, so seeking stays broken however correct the cache write
+    // was. This is the assertion that was impossible before the native
+    // `respond` gained a header channel.
+    expect(firstRes.calls[0]?.headers).toEqual({
+      'Content-Range': `bytes 0-9/${payload.length}`,
+    });
+
+    // 2. an identical second Range request is a disk hit — no new origin
+    // fetch (config().fetch call count unchanged), served straight off disk.
+    const fetchCallsBefore = (BlobUtilMock.config as jest.Mock).mock.calls
+      .length;
+    const secondRes = mockResponse();
+    await (manager as any).addSegmentHandler(
+      SEG_URL,
+      basePath,
+      { Range: RANGE },
+      secondRes
+    );
+    await waitForResponse(secondRes);
+    expect(secondRes.calls[0]?.code).toBe(200); // the disk-hit branch's own response code
+    expect((BlobUtilMock.config as jest.Mock).mock.calls.length).toBe(
+      fetchCallsBefore
+    ); // no re-fetch — a genuine cache hit
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 9 — prefetch-only-evict-clean: an asset prefetched but never played
+// leaves zero files and no registry entry after evict (TASK-010,
+// UC-PrefetchSegmentRegistration INV-02, BUG-10 regression net;
+// stage-prefetch-only-evict-clean).
+// ---------------------------------------------------------------------------
+describe('Stage 9 — prefetch-only-evict-clean (stage-prefetch-only-evict-clean, UC-PrefetchSegmentRegistration)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+    __resetPinGenerationGuardForTests();
+  });
+
+  it('prefetching segments for an asset that is never played, then evicting it, leaves zero files on disk and clears the registry entry', async () => {
+    const manager = new CacheManager('lifecycle-prefetch-evict-clean', true);
+    manager.enableMemoryCache(new FreePolicy());
+
+    const PLAYLIST_URL =
+      'https://cdn.example.com/videos/lifecycle-prefetch-evict/index.m3u8';
+    const SEG0 =
+      'https://cdn.example.com/videos/lifecycle-prefetch-evict/seg0.ts';
+    const ownerKey = CacheKeyPolicy.keyFor(PLAYLIST_URL);
+    const seg0Path = CacheKeyPolicy.filePathFor(
+      SEG0,
+      manager.cacheFolder,
+      KEY_PREFIX
+    );
+    const playlistPath = playlistFilePath(manager, PLAYLIST_URL);
+
+    BlobUtilMock.__queueFetchResponse({
+      data: b64(playlist(['seg0.ts'])),
+      headers: {},
+    });
+    const seg0Payload = 'prefetch-only-seg0-bytes';
+    BlobUtilMock.__queueFetchResponse({
+      data: b64(seg0Payload),
+      headers: { 'Content-Length': String(b64(seg0Payload).length) },
+    });
+
+    // prefetch only — this asset is NEVER played (no addPlaylistHandler /
+    // addSegmentHandler call through it at all, unlike Stage 7).
+    manager.setActiveWindow([PLAYLIST_URL], 0, {
+      ahead: 0,
+      behind: 0,
+      segmentCount: 1,
+    });
+    await waitFor(() => BlobUtilMock.__hasFile(seg0Path));
+
+    // the asset is registered and its files genuinely landed on disk.
+    expect(manager.memoryCache?.has(ownerKey)).toBe(true);
+    expect(BlobUtilMock.__hasFile(playlistPath)).toBe(true);
+    expect(BlobUtilMock.__hasFile(seg0Path)).toBe(true);
+
+    await manager.removeCachedVideo(PLAYLIST_URL);
+
+    // INV-02: zero files remain, registry cleared — a prefetch-only asset
+    // is cleaned up exactly like a played one, never leaked.
+    expect(manager.memoryCache?.has(ownerKey)).toBe(false);
+    expect(BlobUtilMock.__hasFile(playlistPath)).toBe(false);
+    expect(BlobUtilMock.__hasFile(seg0Path)).toBe(false);
+  }, 15000);
+});
+
+// ---------------------------------------------------------------------------
+// Stage 10 — origin-4xx-never-cached: a non-2xx origin response for a
+// segment is passed through with its real status and never promoted to a
+// cache path (TASK-010, UC-OriginErrorRejection, BUG-11 regression net;
+// stage-origin-4xx-never-cached).
+// ---------------------------------------------------------------------------
+describe('Stage 10 — origin-4xx-never-cached (stage-origin-4xx-never-cached, UC-OriginErrorRejection)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+  });
+
+  it('a mocked 4xx origin response is passed through with its real status and never promoted to a final cache path', async () => {
+    const manager = new CacheManager('lifecycle-origin-4xx', true);
+    manager.enableMemoryCache(new FreePolicy());
+    await manager.enableBridgeServer(52112);
+
+    // owner must exist before a segment request proceeds past
+    // OWNER_ASSET_MISSING (same convention as Stage 8).
+    const PLAYLIST_URL =
+      'https://cdn.example.com/videos/lifecycle-4xx/index.m3u8';
+    await ingestHlsAsset(manager, PLAYLIST_URL, []);
+
+    const SEG_URL = 'https://cdn.example.com/videos/lifecycle-4xx/seg0.ts';
+    const basePath = CacheKeyPolicy.filePathFor(
+      SEG_URL,
+      manager.cacheFolder,
+      KEY_PREFIX
+    );
+
+    const errorBody = 'Forbidden';
+    BlobUtilMock.__setFetchResponse({
+      status: 403,
+      data: b64(errorBody),
+      headers: { 'Content-Length': String(b64(errorBody).length) },
+    });
+
+    const res = mockResponse();
+    await (manager as any).addSegmentHandler(SEG_URL, basePath, {}, res);
+    await waitForResponse(res);
+
+    // passed through with the origin's real status — never synthesized as
+    // a generic 500, never silently swallowed as a 200.
+    expect(res.calls[0]?.code).toBe(403);
+
+    // never promoted to a cache path — neither the final path nor its
+    // in-progress temp write survive, so a later request still misses and
+    // re-fetches instead of being served a stale/rejected body.
+    expect(BlobUtilMock.__hasFile(basePath)).toBe(false);
+    expect(BlobUtilMock.__hasFile(tempCachePathFor(basePath))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 11 — single-dispatch-per-request: racing two listen() calls on the
+// same BridgeServer still dispatches exactly one response handler per
+// request (TASK-010, UC-SingleProxyListenerLifecycle, BUG-7 regression net;
+// stage-single-dispatch-per-request).
+// ---------------------------------------------------------------------------
+describe('Stage 11 — single-dispatch-per-request (stage-single-dispatch-per-request, UC-SingleProxyListenerLifecycle)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+  });
+
+  it('two concurrent listen() calls on the same BridgeServer settle to one subscription, and a request dispatched afterward fires its handler exactly once', async () => {
+    const manager = new CacheManager('lifecycle-single-dispatch', true);
+    manager.enableMemoryCache(new FreePolicy());
+    const PORT = 52113;
+    NativeProxyMock.__setStartResult(PORT);
+
+    // register the ONE route handler this manager will ever add (mirrors
+    // enableBridgeServer's own call, done once here so racing listen()
+    // below never re-registers a second callback for the same route — the
+    // route-registration count is a separate concern from the listener
+    // subscription this stage targets).
+    (manager as any).addRequestHandlers();
+    const bridgeServer = (manager as any)._bridgeServer;
+
+    // race two concurrent listen() calls on the SAME BridgeServer instance
+    // — the exact scenario UC-SingleProxyListenerLifecycle guards (mount
+    // effect + AppState 'active', or a dev double-effect).
+    const [boundA, boundB] = await Promise.all([
+      bridgeServer.listen(PORT),
+      bridgeServer.listen(PORT),
+    ]);
+    expect(boundA).toBe(boundB);
+    expect(DeviceEventEmitter.listenerCount('httpServerResponseReceived')).toBe(
+      1
+    );
+
+    // reflect the now-bound port into serverState so getOriginURL (reached
+    // via addRequestHandlers' dispatch below) resolves it — enableBridgeServer
+    // normally does this itself; bypassed here so the race above targets
+    // `_bridgeServer.listen` directly instead of racing enableBridgeServer
+    // (which would re-run addRequestHandlers and double-register the route).
+    (manager as any).setServerState({ status: 'ready', port: boundA });
+
+    const SEG_URL = 'https://cdn.example.com/videos/lifecycle-single/seg0.ts';
+    const proxied = new URL(reverseProxyURL(SEG_URL, PORT));
+
+    (NativeProxyMock.respond as jest.Mock).mockClear();
+    DeviceEventEmitter.emit('httpServerResponseReceived', {
+      requestId: 'req-single-dispatch',
+      type: 'GET',
+      url: proxied.pathname + proxied.search,
+    });
+    await pollUntil(
+      () => (NativeProxyMock.respond as jest.Mock).mock.calls.length >= 1
+    );
+    // give any (bug) double-dispatch a few more macrotasks to surface
+    // before asserting the final count.
+    await pollUntil(() => false, 5);
+
+    expect(NativeProxyMock.respond).toHaveBeenCalledTimes(1);
+    expect(
+      (NativeProxyMock.respond as jest.Mock).mock.calls.filter(
+        (call: any[]) => call[0] === 'req-single-dispatch'
+      )
+    ).toHaveLength(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -920,12 +1259,55 @@ describe('AC4 — a malformed/unsupported URL never crashes the process, anywher
     await pollUntil(
       () => (NativeProxyMock.respond as jest.Mock).mock.calls.length >= 1
     );
-    expect(NativeProxyMock.respond).toHaveBeenCalledWith(
-      'req-malformed',
-      400,
-      'text/plain',
+    // TASK-010 update: TASK-005 (BUG-8) base64-encodes every Response.send
+    // body unconditionally now — assert on the decoded body.
+    const malformedCall = (
+      NativeProxyMock.respond as jest.Mock
+    ).mock.calls.find((call: any[]) => call[0] === 'req-malformed')!;
+    expect(malformedCall[1]).toBe(400);
+    expect(malformedCall[2]).toBe('text/plain');
+    expect(Buffer.from(malformedCall[3], 'base64').toString('utf8')).toBe(
       'Bad Request'
     );
+
+    // R1/R10 REGRESSION — a PRESENT but MALFORMED origin. Distinct from the
+    // missing-param case above, and the one that actually broke: measured on
+    // an iOS simulator, both of these reached react-native-blob-util, whose
+    // promise never settled, so respond() was never called and the request
+    // HUNG (8s+, zero bytes) instead of erroring. The suite passed throughout,
+    // because the mock's fetch always settles. Assert a fast, defined answer.
+    const malformedOrigins: Array<[string, string]> = [
+      ['req-malformed-notaurl', 'not-a-url'],
+      ['req-malformed-percent', '%'],
+      ['req-malformed-scheme', 'ftp://cdn.example.com/seg.ts'],
+    ];
+    for (const [requestId, origin] of malformedOrigins) {
+      expect(() => {
+        DeviceEventEmitter.emit('httpServerResponseReceived', {
+          requestId,
+          type: 'GET',
+          url: `/seg.ts?__hls_origin_url=${origin}`,
+        });
+      }).not.toThrow();
+    }
+    await pollUntil(() =>
+      malformedOrigins.every(([requestId]) =>
+        (NativeProxyMock.respond as jest.Mock).mock.calls.some(
+          (call: any[]) => call[0] === requestId
+        )
+      )
+    );
+    for (const [requestId] of malformedOrigins) {
+      const call = (NativeProxyMock.respond as jest.Mock).mock.calls.find(
+        (c: any[]) => c[0] === requestId
+      );
+      // the point of the test: a response EXISTS at all
+      expect(call).toBeDefined();
+      expect(call![1]).toBe(400);
+      expect(Buffer.from(call![3], 'base64').toString('utf8')).toBe(
+        'Bad Request'
+      );
+    }
 
     // an unsupported (non-HLS, never-ingested) url proxied through — routed
     // to addSegmentHandler, which always responds even with no owner known.
