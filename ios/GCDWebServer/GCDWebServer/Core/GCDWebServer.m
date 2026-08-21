@@ -66,6 +66,7 @@ NSString* const GCDWebServerOption_ConnectedStateCoalescingInterval = @"Connecte
 NSString* const GCDWebServerOption_DispatchQueuePriority = @"DispatchQueuePriority";
 #if TARGET_OS_IPHONE
 NSString* const GCDWebServerOption_AutomaticallySuspendInBackground = @"AutomaticallySuspendInBackground";
+NSString* const GCDWebServerOption_DisableBackgroundTask = @"DisableBackgroundTask";
 #endif
 
 NSString* const GCDWebServerAuthenticationMethod_Basic = @"Basic";
@@ -230,7 +231,8 @@ static void _ExecuteMainThreadRunLoopSources() {
   GWS_LOG_DEBUG(@"Did connect");
 
 #if TARGET_OS_IPHONE
-  if ([[UIApplication sharedApplication] applicationState] != UIApplicationStateBackground) {
+  BOOL disableBackgroundTask = [(NSNumber*)_GetOption(_options, GCDWebServerOption_DisableBackgroundTask, @NO) boolValue];
+  if (!disableBackgroundTask && [[UIApplication sharedApplication] applicationState] != UIApplicationStateBackground) {
     [self _startBackgroundTask];
   }
 #endif
