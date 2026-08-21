@@ -210,6 +210,12 @@ extern NSString* const GCDWebServerOption_DispatchQueuePriority;
  */
 extern NSString* const GCDWebServerOption_AutomaticallySuspendInBackground;
 
+/**
+ *  Enables the GCDWebServer to not create a background task when connections are open.
+ *  This prevents termination risk by iOS when the app goes to the background.
+ */
+extern NSString* const GCDWebServerOption_DisableBackgroundTask;
+
 #endif
 
 /**

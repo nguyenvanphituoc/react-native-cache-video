@@ -108,6 +108,8 @@ RCT_EXPORT_METHOD(start:(double) port
         if (serviceName != nil) {
             options[GCDWebServerOption_BonjourName] = serviceName;
         }
+        options[GCDWebServerOption_DisableBackgroundTask] = @YES;
+
 
         NSError* error = nil;
         if ([_webServer startWithOptions:options error:&error]) {
