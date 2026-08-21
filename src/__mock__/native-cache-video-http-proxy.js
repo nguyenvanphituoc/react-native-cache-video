@@ -11,6 +11,18 @@ const defaultStartBehavior = () => ({ kind: 'resolve', value: true });
 
 let startBehavior = defaultStartBehavior();
 
+// downloadToFile (TASK-004): default mirrors a plain 200 with no headers.
+const defaultDownloadBehavior = () => ({
+  kind: 'resolve',
+  value: { status: 200, headers: {}, contentLength: null, contentRange: null },
+});
+
+let downloadBehavior = defaultDownloadBehavior();
+
+// requestId -> the Promise executor's `reject`, for in-flight downloadToFile
+// calls only (removed once settled, either way).
+const pendingDownloads = new Map();
+
 const NativeCacheVideoHttpProxyMock = {
   start: jest.fn((_port, _serviceName) => {
     if (startBehavior.kind === 'throw') {
@@ -100,6 +112,83 @@ const NativeCacheVideoHttpProxyMock = {
     return call ? Buffer.from(call[3], 'base64').toString('utf8') : null;
   },
 
+  // Mirrors the REAL Android native contract (TASK-004): streams to
+  // `destPath` and resolves a JSON-ENCODED STRING (same convention as
+  // `respond`'s headersJson — see src/NativeCacheVideoHttpProxy.ts). Invalid
+  // arguments are recorded as violations rather than thrown (same pattern as
+  // `respond`), since the shipped native is itself defensive.
+  downloadToFile: jest.fn((url, headersJson, destPath, requestId) => {
+    const violations = NativeCacheVideoHttpProxyMock.__contractViolations;
+
+    if (typeof url !== 'string' || url.length === 0) {
+      violations.push(`url is ${typeof url}, expected a non-empty string`);
+    }
+    if (typeof headersJson !== 'string') {
+      violations.push(
+        `headersJson is ${typeof headersJson}, expected a string`
+      );
+    } else {
+      try {
+        const parsed = JSON.parse(headersJson);
+        if (
+          parsed === null ||
+          typeof parsed !== 'object' ||
+          Array.isArray(parsed)
+        ) {
+          violations.push('headersJson did not parse to an object');
+        }
+      } catch (e) {
+        violations.push(`headersJson is not valid JSON: ${headersJson}`);
+      }
+    }
+    if (typeof destPath !== 'string' || destPath.length === 0) {
+      violations.push(
+        `destPath is ${typeof destPath}, expected a non-empty string`
+      );
+    }
+    if (typeof requestId !== 'string' || requestId.length === 0) {
+      violations.push(
+        `requestId is ${typeof requestId}, expected a non-empty string`
+      );
+    }
+
+    if (downloadBehavior.kind === 'reject') {
+      const rejection = Promise.reject(downloadBehavior.error);
+      rejection.catch(() => {});
+      return rejection;
+    }
+
+    // Stays genuinely pending across the current synchronous turn so a
+    // same-tick __cancelDownload(requestId) can still intercept it (the
+    // resolution below is deferred to a microtask) — mirrors the real
+    // native's async streaming Call, where cancelDownload races the read.
+    const promise = new Promise((resolve, reject) => {
+      pendingDownloads.set(requestId, { reject });
+      Promise.resolve().then(() => {
+        if (!pendingDownloads.has(requestId)) {
+          return; // settled early by __cancelDownload
+        }
+        pendingDownloads.delete(requestId);
+        resolve(JSON.stringify(downloadBehavior.value));
+      });
+    });
+    promise.catch(() => {});
+    return promise;
+  }),
+
+  // Cancels the tracked pending downloadToFile call for `requestId`,
+  // rejecting its promise with a cancellation reason. A `requestId` with no
+  // tracked in-flight call resolves as a no-op (matches
+  // android-download-transport.contract#Method-cancelDownload Error Cases).
+  cancelDownload: jest.fn((requestId) => {
+    const pending = pendingDownloads.get(requestId);
+    if (pending) {
+      pendingDownloads.delete(requestId);
+      pending.reject(new Error(`Download cancelled: ${requestId}`));
+    }
+    return Promise.resolve();
+  }),
+
   // --- test knobs -----------------------------------------------------------
   __setStartResult(value) {
     startBehavior = { kind: 'resolve', value };
@@ -110,11 +199,21 @@ const NativeCacheVideoHttpProxyMock = {
   __setStartThrow(error) {
     startBehavior = { kind: 'throw', error };
   },
+  __setDownloadResponse(response) {
+    downloadBehavior = { kind: 'resolve', value: response };
+  },
+  __setDownloadError(error) {
+    downloadBehavior = { kind: 'reject', error };
+  },
   __reset() {
     startBehavior = defaultStartBehavior();
+    downloadBehavior = defaultDownloadBehavior();
+    pendingDownloads.clear();
     NativeCacheVideoHttpProxyMock.start.mockClear();
     NativeCacheVideoHttpProxyMock.stop.mockClear();
     NativeCacheVideoHttpProxyMock.respond.mockClear();
+    NativeCacheVideoHttpProxyMock.downloadToFile.mockClear();
+    NativeCacheVideoHttpProxyMock.cancelDownload.mockClear();
     NativeCacheVideoHttpProxyMock.__contractViolations.length = 0;
   },
 };

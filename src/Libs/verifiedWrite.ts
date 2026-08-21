@@ -12,7 +12,6 @@
 //
 // See shapeup/hls-caching-features/spec/contracts/cache-file-store.contract.md.
 
-import { Platform } from 'react-native';
 import type { SessionTaskInterface } from '../types/type';
 import {
   FileBucket,
@@ -167,42 +166,6 @@ export class CacheFileRepository {
 
     setDownloading(key, true);
     try {
-      // BUG-17 — Android cannot use react-native-blob-util's stream-to-file
-      // path. Measured on an Android 16 emulator against 0.24.10: every
-      // download truncates to EXACTLY 8192 bytes (one Okio segment), so
-      // anything larger fails its Content-Length check and is never cached —
-      // i.e. no real HLS segment ever caches, and playback shows nothing.
-      //
-      // Upstream cause, for whoever revisits this:
-      // `ReactNativeBlobUtilFileResp.ProgressReportingSource.read()` writes
-      // each chunk to the destination file but NEVER writes it into the Okio
-      // `sink`. The drain loop in `ReactNativeBlobUtilReq.done()` therefore
-      // sees an empty buffer after the first 8192-byte read, treats it as EOF,
-      // stops, and `isDownloadComplete()` (bytesDownloaded == contentLength)
-      // fails -> the promise rejects with "Download interrupted." Verified
-      // exactly at the boundary: 8192 B succeeds, 8193 B fails.
-      //
-      // Workaround: on Android take the body in memory (blob-util's
-      // KeepInMemory path, which is unaffected) and write the file ourselves.
-      // Platform-gated deliberately — iOS streams straight to disk correctly
-      // and is verified working, so it keeps the lower-memory path.
-      if (Platform.OS === 'android') {
-        const response = await this.sessionTask.dataTask(url, {
-          ...(headers ? { headers } : {}),
-        });
-        const contentLength = contentLengthOf(response?.respInfo?.headers);
-        const status = response?.respInfo?.status ?? 200;
-        const contentRange = contentRangeOf(response?.respInfo?.headers);
-        // `RNFB-Response: base64` (set in SimpleSessionProvider.dataTask)
-        // makes `data` a base64 string for the in-memory path.
-        await this.storage.write(
-          tempPath,
-          String(response?.data ?? ''),
-          'base64'
-        );
-        return { tempPath, contentLength, status, contentRange };
-      }
-
       const response = await this.sessionTask.dataTask(url, {
         overwrite: true,
         fileCache: true,

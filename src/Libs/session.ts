@@ -1,3 +1,4 @@
+import { Platform } from 'react-native';
 import RNFetchBlob from 'react-native-blob-util';
 
 import type {
@@ -10,8 +11,46 @@ import type {
   SessionTaskOptionsType,
 } from '../types/type';
 import { KEY_PREFIX } from '../Utils/constants';
+import { CacheVideoHttpProxy } from './httpProxy';
 
 export * from 'react-native-blob-util';
+
+// TASK-005 (UC-StreamAndroidDownload/UC-CancelAndroidDownload,
+// [[contracts/android-download-transport.contract#Method-downloadToFile]]):
+// requestId uniqueness mirrors Server.kt's own NanoHTTPD `requestId`
+// convention (`"$millis:$rand"`, android/.../httpServer/Server.kt) — same
+// key-space idea, cheap collision-avoidance for concurrent calls without a
+// new dependency.
+function generateAndroidRequestId(): string {
+  return `${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+// TASK-005: adapts the native downloadToFile result ({status, headers,
+// contentLength, contentRange} JSON string) into the SAME
+// StatefulPromise<FetchBlobResponse> shape every existing dataTask caller
+// already depends on — contentLengthOf/contentRangeOf (verifiedWrite.ts)
+// read `.respInfo.headers` unchanged (discovered-seed.md item 3), callers
+// read `.respInfo.status`. No caller in this codebase invokes
+// FetchBlobResponse's blob()/text()/json()/base64()/readFile()/readStream()/
+// info()/session()/flush() on a dataTask result (grepped repo-wide), so
+// those are intentionally left unimplemented rather than faked.
+function toAndroidFetchBlobResponse(
+  raw: string,
+  path: string,
+  requestId: string
+): FetchBlobResponse {
+  const parsed = JSON.parse(raw) as {
+    status: number;
+    headers: Record<string, string>;
+  };
+  return {
+    taskId: requestId,
+    type: 'path',
+    data: path,
+    path: () => path,
+    respInfo: { status: parsed.status, headers: parsed.headers },
+  } as unknown as FetchBlobResponse;
+}
 
 // TASK-012 (D3/isBusy, [[domain-model#Repository-Interfaces]]): the
 // playback-priority signal composes from THIS session layer's own per-URL
@@ -60,18 +99,55 @@ export class SimpleSessionProvider implements PrefetchAwareSessionTask {
     );
   };
 
+  // TASK-005: Android's {fileCache:true, path} branch of dataTask — streams
+  // via the native TurboModule (OkHttp/Okio) instead of RNFetchBlob, whose
+  // stream-to-file path truncates at 8192 bytes on Android (BUG-17,
+  // verifiedWrite.ts writeTemp comment). `.cancel()` maps to native
+  // `cancelDownload(requestId)` (UC-CancelAndroidDownload); the underlying
+  // `downloadToFile` promise rejects once native processes the cancel, so
+  // `task` rejects on its own — no manual reject needed here.
+  private androidDataTask = (
+    url: string,
+    path: string,
+    headers?: Record<string, string>
+  ): StatefulPromise<FetchBlobResponse> => {
+    const requestId = generateAndroidRequestId();
+    const task = CacheVideoHttpProxy.downloadToFile(
+      url,
+      JSON.stringify(headers ?? {}),
+      path,
+      requestId
+    ).then((raw) =>
+      toAndroidFetchBlobResponse(raw, path, requestId)
+    ) as StatefulPromise<FetchBlobResponse>;
+
+    task.cancel = (
+      cb?: (reason: any) => void
+    ): StatefulPromise<FetchBlobResponse> => {
+      CacheVideoHttpProxy.cancelDownload(requestId).then(
+        () => cb && cb(undefined)
+      );
+      return task;
+    };
+
+    return task;
+  };
+
   dataTask = (
     url: string,
     options: SessionTaskOptionsType,
     callback?: (data: any, res: any, error?: Error) => void
   ): StatefulPromise<FetchBlobResponse> => {
-    const downloadTask = RNFetchBlob.config({
-      session: KEY_PREFIX,
-      ...options,
-    }).fetch('GET', url, {
-      'RNFB-Response': 'base64',
-      ...options.headers,
-    });
+    const downloadTask =
+      Platform.OS === 'android' && options.fileCache && options.path
+        ? this.androidDataTask(url, options.path, options.headers)
+        : RNFetchBlob.config({
+            session: KEY_PREFIX,
+            ...options,
+          }).fetch('GET', url, {
+            'RNFB-Response': 'base64',
+            ...options.headers,
+          });
     // mark it as downloading
     this.downloadingList[url] = downloadTask;
     // listen response download
