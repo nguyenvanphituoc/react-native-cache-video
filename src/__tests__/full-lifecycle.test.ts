@@ -1022,7 +1022,15 @@ describe('Stage 8 — ranged-segment-round-trip (stage-ranged-segment-round-trip
       secondRes
     );
     await waitForResponse(secondRes);
-    expect(secondRes.calls[0]?.code).toBe(200); // the disk-hit branch's own response code
+    // UC-RangedCacheHitContentRange (TASK-007): the first request's MISS
+    // persisted this segment's total (Content-Range's total, above) to the
+    // SegmentTotalLengthRecord side map — the disk-hit branch now answers a
+    // repeat ranged request with 206 + a reconstructed Content-Range,
+    // instead of the pre-A3 bare 200.
+    expect(secondRes.calls[0]?.code).toBe(206);
+    expect(secondRes.calls[0]?.headers).toEqual({
+      'Content-Range': `bytes 0-9/${payload.length}`,
+    });
     expect((BlobUtilMock.config as jest.Mock).mock.calls.length).toBe(
       fetchCallsBefore
     ); // no re-fetch — a genuine cache hit

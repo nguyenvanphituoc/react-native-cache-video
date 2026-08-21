@@ -101,3 +101,67 @@ jobs:
         run: |
           yarn turbo run build:android --cache-dir="${{ env.TURBO_CACHE_DIR }}"
 
+  build-android-expo:
+    runs-on: ubuntu-latest
+    env:
+      TURBO_CACHE_DIR: .turbo/android-expo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect relevant changes
+        if: github.event_name == 'pull_request'
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            relevant:
+              - 'src/**'
+              - 'example-expo/**'
+
+      - name: Setup
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        uses: ./.github/actions/setup
+
+      - name: Cache turborepo for Android (Expo)
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TURBO_CACHE_DIR }}
+          key: ${{ runner.os }}-turborepo-android-expo-${{ hashFiles('**/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-turborepo-android-expo-
+
+      - name: Install JDK
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Finalize Android SDK
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        run: |
+          /bin/bash -c "yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null"
+
+      - name: Expo prebuild (Android)
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        working-directory: example-expo
+        run: yarn expo prebuild --platform android
+
+      - name: Cache Gradle (Expo)
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/wrapper
+            ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-expo-${{ hashFiles('example-expo/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-expo-
+
+      - name: Build example-expo for Android
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        working-directory: example-expo/android
+        run: ./gradlew assembleDebug
+
