@@ -19,6 +19,13 @@ export type CacheEntry = (
       kind: 'media';
       path: string;
       bytes: number;
+      // TASK-005 (UC-RangedCacheHitContentRange): total resource length, as
+      // observed on the origin's Content-Range (ranged MISS) or
+      // Content-Length (unranged MISS). Additive/optional — REGISTRY_VERSION
+      // unchanged; an entry persisted before this field existed loads with
+      // `totalLength: undefined`, which is exactly what "not yet recorded"
+      // already means (R3 fallback, TASK-007).
+      totalLength?: number;
     }
   | {
       kind: 'hls';
@@ -30,6 +37,15 @@ export type CacheEntry = (
   generation: Generation;
   pinCount: PinCount;
 };
+
+// TASK-006 (UC-RangedCacheHitContentRange): per-segment total byte length
+// for `kind: 'hls'` assets, keyed by the exact range-suffixed
+// `absoluteFilePath` string `addSegmentHandler` already resolves. A separate
+// top-level registry section (sibling to `entries`/`lruCachedLocalFiles`),
+// NOT a field on the shared owner `CacheEntry` — two segments of the same
+// playlist have two different totals and must never collide on one scalar
+// (orient's spike finding).
+export type SegmentTotalLengthRecord = Record<string, number>;
 
 //
 // PrefetchWindow aggregate — domain-model.md#Aggregate-PrefetchWindow

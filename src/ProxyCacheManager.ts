@@ -9,6 +9,7 @@ import type {
   PreCacheInterface,
   MemoryCachePolicyInterface,
   CacheEntry,
+  SegmentTotalLengthRecord,
 } from './types/type';
 import {
   FALLBACK_WARNINGS,
@@ -95,6 +96,52 @@ function contentTypeOf(
     }
   }
   return fallback;
+}
+
+// TASK-005 (UC-RangedCacheHitContentRange step 1): the total resource length
+// observed on an origin MISS — ranged fetch prefers the parsed
+// `Content-Range`'s own total (the format's authoritative value, e.g.
+// "bytes 0-99/1000" -> 1000; "bytes 0-99/*" has no known total, falls
+// through), otherwise `Content-Length` (unranged fetch). `null`/absent
+// Content-Length is "not observed" -> `undefined` (not 0, not skipped —
+// `Content-Length: 0` itself is a valid, falsy-but-real total, TASK-005
+// boundary AC).
+function totalLengthFromWriteTemp(
+  contentLength: number | null,
+  contentRange?: string
+): number | undefined {
+  if (contentRange) {
+    const match = /\/(\d+)\s*$/.exec(contentRange);
+    if (match) {
+      return Number(match[1]);
+    }
+  }
+  return contentLength === null ? undefined : contentLength;
+}
+
+// TASK-007 (UC-RangedCacheHitContentRange step 3a): parse the CURRENT
+// request's own Range header — same `bytes=(\d+)-(\d+)` shape
+// `absoluteFilePath` (Utils/util.ts) already derives the lookup path from.
+// util.ts is outside this scope's write substrate, so the pattern is
+// re-declared here rather than shared; `absoluteFilePath` itself is not
+// reused for this purpose because it returns a rewritten PATH, not the
+// parsed offset/end pair the Content-Range response header needs. A
+// malformed/missing Range value returns `undefined` -> caller falls back to
+// today's plain `200` (R3, no crash).
+function parseCurrentRangeHeader(
+  headers: { [key in string]?: string } | undefined
+): { offset: number; end: number } | undefined {
+  const range = headers?.Range || headers?.range || headers?.RANGE;
+  if (!range) {
+    return undefined;
+  }
+  const result = /bytes=(\d+)-(\d+)/.exec(range);
+  const offset = result?.[1];
+  const end = result?.[2];
+  if (offset === undefined || end === undefined) {
+    return undefined;
+  }
+  return { offset: Number(offset), end: Number(end) };
 }
 
 import {
@@ -208,6 +255,15 @@ export class CacheManager
   // itself — see proxy-request-gateway.contract's handleSegmentRequest
   // Request table) resolves against.
   private _lastHlsOwnerKey?: string;
+
+  // TASK-006 (UC-RangedCacheHitContentRange): per-segment total-length side
+  // map for `kind: 'hls'` assets — keyed by the exact range-suffixed
+  // `absoluteFilePath` string, never on the shared owner CacheEntry (two
+  // segments of the same playlist hold two distinct totals). Persisted as
+  // its own top-level registry JSON section alongside loadCacheFromStorage/
+  // saveCacheToStorage; an old document with no such section hydrates an
+  // empty map, so a lookup on it is `undefined` (R3), never a throw.
+  private _segmentTotalLengths: Map<string, number> = new Map();
 
   // N8 provider-missing guard (issue #8, round-ledger D5): true ONLY on the
   // module-default context instance in useProxyCacheProvider — a non-breaking
@@ -507,6 +563,15 @@ export class CacheManager
           this._storage.unlinkFile(segmentPath)
         ),
       ]);
+      // TASK-006 (UC-RangedCacheHitContentRange step 6, INV-05): the GC
+      // tie-in — every segment path this eviction removes from disk also
+      // loses its SegmentTotalLengthRecord entry, so the side map never
+      // accumulates stale per-segment totals for files that no longer
+      // exist. A path with no recorded total is a no-op Map#delete, not a
+      // crash (TASK-006 empty-state AC).
+      entry.segmentPaths.forEach((segmentPath) => {
+        this._segmentTotalLengths.delete(segmentPath);
+      });
     } else {
       await this._storage.unlinkFile(entry.path);
     }
@@ -532,6 +597,7 @@ export class CacheManager
 
     if (!jsonStr) {
       // file missing (first run) — never throws
+      this._segmentTotalLengths = new Map();
       return { version: 0, entries: new Map() };
     }
 
@@ -540,6 +606,7 @@ export class CacheManager
       parsed = JSON.parse(jsonStr);
     } catch (error) {
       // corrupt/unparsable JSON — never throws, never repaired-in-place
+      this._segmentTotalLengths = new Map();
       return { version: 0, entries: new Map() };
     }
 
@@ -551,6 +618,9 @@ export class CacheManager
         sweptCount: swept.swept.length,
         bytesReclaimed: swept.bytesReclaimed,
       });
+      // TASK-006: an old/untagged document has no side-map section — hydrate
+      // empty, exactly like the discarded entries above.
+      this._segmentTotalLengths = new Map();
       return { version: 0, entries: new Map() };
     }
 
@@ -560,6 +630,15 @@ export class CacheManager
       (this._memoryCache?.export().lruCachedLocalFiles ?? []) as Array<
         [string, CacheEntry]
       >
+    );
+    // TASK-006: hydrate the side map from its own top-level section — a v2
+    // document written before this task simply has no `segmentTotalLengths`
+    // key, so this yields an empty map (side-map lookups on it are
+    // `undefined`, never a throw).
+    this._segmentTotalLengths = new Map(
+      Object.entries(
+        (parsed.segmentTotalLengths ?? {}) as SegmentTotalLengthRecord
+      )
     );
     return { version: REGISTRY_VERSION, entries };
   }
@@ -571,8 +650,14 @@ export class CacheManager
     if (this._memoryCache) {
       //
       const memoryCache = this._memoryCache.export();
+      // TASK-006: side-map section, sibling to `entries`/`lruCachedLocalFiles`
+      // — additive, no REGISTRY_VERSION bump.
+      const segmentTotalLengths: SegmentTotalLengthRecord = Object.fromEntries(
+        this._segmentTotalLengths
+      );
       const jsonObj = Object.assign(memoryCache, {
         version: REGISTRY_VERSION,
+        segmentTotalLengths,
       });
       const jsonStr = JSON.stringify(jsonObj);
 
@@ -1072,6 +1157,25 @@ export class CacheManager
             if (ownerKey) {
               this.registerSegmentUnderOwner(ownerKey, absFilePath, streamData);
             }
+
+            // TASK-007 (UC-RangedCacheHitContentRange steps 3-5): a total is
+            // looked up the SAME way regardless of ownerKey/kind — undefined
+            // whenever there is no owner, no recorded total, or the owner is
+            // an `hls` entry with nothing on record for THIS segment's own
+            // path (R3 fallback is what "undefined" already means, not a
+            // separate branch). Only 206 + Content-Range when the CURRENT
+            // request also carries a parseable Range header; a non-ranged
+            // request or a malformed one never gets a fabricated 206.
+            const recordedTotal = this.resolveRecordedTotal(
+              ownerKey,
+              absFilePath
+            );
+            const currentRange = parseCurrentRangeHeader(headers);
+            if (recordedTotal !== undefined && currentRange) {
+              return reverseRes.sendRaw(206, HLS_VIDEO_TYPE, streamData, {
+                'Content-Range': `bytes ${currentRange.offset}-${currentRange.end}/${recordedTotal}`,
+              });
+            }
             return reverseRes.sendRaw(200, HLS_VIDEO_TYPE, streamData);
           }
 
@@ -1175,6 +1279,28 @@ export class CacheManager
             rawBody
           );
 
+          // TASK-005/TASK-006 (UC-RangedCacheHitContentRange steps 1-2): a
+          // ranged or unranged origin MISS just promoted successfully — stop
+          // discarding the total it observed. `kind: 'media'` persists
+          // directly on the owning entry (unambiguous, one entry per URL);
+          // `kind: 'hls'` persists in the per-segment side map, keyed by
+          // THIS segment's own `absFilePath` — never on the shared owner
+          // entry (two segments of one playlist hold two different totals).
+          const observedTotal = totalLengthFromWriteTemp(
+            contentLength,
+            originContentRange
+          );
+          if (observedTotal !== undefined) {
+            if (owner.kind === 'media') {
+              this._memoryCache?.put(ownerKey, {
+                ...owner,
+                totalLength: observedTotal,
+              });
+            } else {
+              this._segmentTotalLengths.set(absFilePath, observedTotal);
+            }
+          }
+
           return reverseRes.sendRaw(
             originStatus,
             HLS_VIDEO_TYPE,
@@ -1192,6 +1318,29 @@ export class CacheManager
         reverseRes.send(500, 'text/plain', 'SEGMENT_WRITE_FAILED');
       }
     }
+  }
+
+  // TASK-007 (UC-RangedCacheHitContentRange step 3b): one lookup, both
+  // kinds — `undefined` for a missing owner (including no ownerKey at all,
+  // TS-INV-04/R3), `CacheEntry.totalLength` for `kind: 'media'`, or the
+  // per-segment side map keyed by `absFilePath` for `kind: 'hls'`. Never
+  // branches on ownerKey PRESENCE as a separate code path — the hit branch
+  // above calls this unconditionally and falls back to 200 uniformly
+  // whenever it resolves undefined.
+  private resolveRecordedTotal(
+    ownerKey: string | undefined,
+    absFilePath: string
+  ): number | undefined {
+    if (!ownerKey) {
+      return undefined;
+    }
+    const owner = this._memoryCache?.get(ownerKey);
+    if (!owner) {
+      return undefined;
+    }
+    return owner.kind === 'media'
+      ? owner.totalLength
+      : this._segmentTotalLengths.get(absFilePath);
   }
 
   // Appends `segmentPath` to the owner's segmentPaths and accumulates its

@@ -14,9 +14,22 @@
 import {
   DEFAULT_DENYLIST_PARAMS,
   filePathFor,
+  getDefaultCacheKeyPolicy,
   keyFor,
   normalizeCacheKey,
+  setDefaultCacheKeyPolicy,
 } from '../Utils/cacheKeyPolicy';
+import { CacheManager } from '../ProxyCacheManager';
+import { FreePolicy } from '../Provider/MemoryCacheFreePolicy';
+import {
+  PrefetchWindow,
+  type VerifiedWriteRepo,
+} from '../Provider/PrefetchWindow';
+import type { PrefetchAwareSessionTask } from '../Libs/session';
+import { KEY_PREFIX } from '../Utils/constants';
+import { resetTestHarness } from '../__mock__/harness';
+
+const b64 = (text: string) => Buffer.from(text, 'utf8').toString('base64');
 
 const BASE_URL = 'https://cdn.example.com/videos/big-buck-bunny.mp4';
 const OTHER_HOST_URL =
@@ -217,6 +230,211 @@ describe('DEFAULT_DENYLIST_PARAMS export', () => {
         'policy',
         'token',
       ])
+    );
+  });
+});
+
+describe('TASK-001: setDefaultCacheKeyPolicy / getDefaultCacheKeyPolicy', () => {
+  afterEach(() => {
+    // reset to a no-op default so state never leaks across tests
+    setDefaultCacheKeyPolicy({});
+  });
+
+  it('getDefaultCacheKeyPolicy() returns undefined when setDefaultCacheKeyPolicy was never called', () => {
+    // this is the FIRST assertion to run against the module-level store in
+    // this file — no prior test in this describe block has set it yet.
+    expect(getDefaultCacheKeyPolicy()).toBeUndefined();
+  });
+
+  it('a configured default denylistParams is honored by a keyFor call with no explicit policy', () => {
+    setDefaultCacheKeyPolicy({ denylistParams: ['token'] });
+
+    const withToken = `${BASE_URL}?token=secret123`;
+    expect(keyFor(withToken)).toBe(keyFor(BASE_URL));
+    expect(getDefaultCacheKeyPolicy()).toEqual({ denylistParams: ['token'] });
+  });
+
+  it('an explicit policy argument still wins over the configured default', () => {
+    setDefaultCacheKeyPolicy({ denylistParams: ['token'] });
+
+    const withQuality = `${BASE_URL}?quality=1080p`;
+    // explicit policy denylists nothing extra beyond the built-in default —
+    // `quality` is not in it, so it still participates in the key, proving
+    // the explicit policy (not the module default) was used.
+    const explicitKey = keyFor(withQuality, { denylistParams: [] });
+    expect(explicitKey).not.toBe(keyFor(BASE_URL, { denylistParams: [] }));
+  });
+
+  it('a configured default urlKeyExtractor is honored when no explicit policy is passed', () => {
+    const extractor = jest.fn((url: string) => `default-extractor:${url}`);
+    setDefaultCacheKeyPolicy({ urlKeyExtractor: extractor });
+
+    const key = keyFor(BASE_URL);
+    expect(extractor).toHaveBeenCalledWith(BASE_URL);
+    expect(key).toBe(`default-extractor:${BASE_URL}`);
+  });
+
+  it('an explicit urlKeyExtractor still wins over the configured default extractor', () => {
+    const defaultExtractor = jest.fn((url: string) => `default:${url}`);
+    const explicitExtractor = jest.fn((url: string) => `explicit:${url}`);
+    setDefaultCacheKeyPolicy({ urlKeyExtractor: defaultExtractor });
+
+    const key = keyFor(BASE_URL, { urlKeyExtractor: explicitExtractor });
+    expect(explicitExtractor).toHaveBeenCalledWith(BASE_URL);
+    expect(defaultExtractor).not.toHaveBeenCalled();
+    expect(key).toBe(`explicit:${BASE_URL}`);
+  });
+
+  it('setDefaultCacheKeyPolicy({ denylistParams: [] }) means "strip nothing" — not "use the built-in default"', () => {
+    setDefaultCacheKeyPolicy({ denylistParams: [] });
+
+    const signed = `${BASE_URL}?Expires=1000&Signature=abc`;
+    // with an empty default denylist, Expires/Signature are NOT stripped —
+    // so the key differs from the bare URL's key.
+    expect(keyFor(signed)).not.toBe(keyFor(BASE_URL));
+  });
+});
+
+describe('TASK-002: package-root export surface', () => {
+  it("`import { setDefaultCacheKeyPolicy } from 'react-native-cache-video'` resolves at the package root", () => {
+    // Import by package name would require the package to be built+linked as
+    // itself, which this repo's test setup doesn't do — so resolve the same
+    // module jest already resolves everything else through, `src/index.tsx`,
+    // and verify the re-export reaches consumers through `export * from './Utils'`.
+    const pkg = require('../index');
+
+    expect(typeof pkg.setDefaultCacheKeyPolicy).toBe('function');
+    expect(typeof pkg.getDefaultCacheKeyPolicy).toBe('function');
+    expect(typeof pkg.keyFor).toBe('function');
+    expect(typeof pkg.filePathFor).toBe('function');
+    expect(typeof pkg.normalizeCacheKey).toBe('function');
+    expect(Array.isArray(pkg.DEFAULT_DENYLIST_PARAMS)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-003 — a configured module-level default reaches existing, UNEDITED
+// call sites in ProxyCacheManager.ts and PrefetchWindow.ts (INV-01/02/03).
+// ---------------------------------------------------------------------------
+type FakeRepo = VerifiedWriteRepo & {
+  writeTemp: jest.Mock;
+  verifyAndPromote: jest.Mock;
+};
+
+function createFakeRepo(): FakeRepo {
+  return {
+    writeTemp: jest.fn(async (_url: string, key: string) => ({
+      tempPath: `/mock/tmp/${key}.part`,
+      contentLength: 10,
+    })),
+    verifyAndPromote: jest.fn(async (tempPath: string) => ({
+      promoted: true,
+      finalPath: tempPath.replace(/\.part$/, ''),
+    })),
+  };
+}
+
+function createFakeSession(): PrefetchAwareSessionTask & {
+  dataTask: jest.Mock;
+} {
+  return {
+    dataTask: jest.fn(async () => ({
+      data: '',
+      respInfo: { status: 200, headers: {} },
+    })),
+    cancelTask: jest.fn(),
+    cancelAllTask: jest.fn(),
+    isBusy: jest.fn(() => false),
+    markPrefetch: jest.fn(),
+  } as any;
+}
+
+describe('TASK-003: default policy honored across existing call sites (ProxyCacheManager + PrefetchWindow)', () => {
+  beforeEach(() => {
+    resetTestHarness();
+  });
+
+  afterEach(() => {
+    setDefaultCacheKeyPolicy({});
+  });
+
+  it('a configured default reaches ProxyCacheManager.ts keyFor/filePathFor call sites with ZERO edits to that file', () => {
+    setDefaultCacheKeyPolicy({ denylistParams: ['session'] });
+
+    const manager = new CacheManager(
+      'cache-key-policy-integration-test',
+      false
+    );
+    manager.enableMemoryCache(new FreePolicy());
+
+    const withSession = `${BASE_URL}?session=abc123`;
+    // put registered under the `?session=` URL …
+    (manager as any).putCachedFile(withSession, manager.cacheFolder);
+
+    // … a bare request for the SAME video (no `session` param) is a HIT,
+    // because ProxyCacheManager's existing (unedited) keyFor call site now
+    // strips `session` per the configured default.
+    const expected = filePathFor(BASE_URL, manager.cacheFolder, KEY_PREFIX);
+    expect(manager.getCachedFile(BASE_URL)).toBe(expected);
+    expect(manager.contain(BASE_URL)).toBe(true);
+  });
+
+  it('an unconfigured consumer sees byte-identical pre-existing behavior (no default set)', () => {
+    const manager = new CacheManager('cache-key-policy-no-default-test', false);
+    manager.enableMemoryCache(new FreePolicy());
+
+    const withSession = `${BASE_URL}?session=abc123`;
+    (manager as any).putCachedFile(withSession, manager.cacheFolder);
+
+    // `session` is NOT a built-in DEFAULT_DENYLIST_PARAMS entry, so with no
+    // module default configured, a bare request is still a MISS — unchanged
+    // pre-0.5.1 behavior.
+    expect(manager.contain(BASE_URL)).toBe(false);
+  });
+
+  it('a prefetch-time key (PrefetchWindow) and a playback-time key (ProxyCacheManager) for the SAME url agree under the same configured default', async () => {
+    setDefaultCacheKeyPolicy({ denylistParams: ['session'] });
+
+    const segUrl = 'https://cdn.example.com/stream/seg0.ts?session=abc123';
+    const playlistUrl = 'https://cdn.example.com/stream/index.m3u8';
+    const playlistText = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:3',
+      '#EXTINF:10.0,',
+      segUrl,
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+
+    const session = createFakeSession();
+    session.dataTask.mockImplementation(async () => ({
+      data: b64(playlistText),
+    }));
+    const repo = createFakeRepo();
+    const window = new PrefetchWindow(session, {
+      cacheFileRepo: repo,
+      segmentCount: 1,
+    });
+
+    // prefetch-time: PrefetchWindow's existing (unedited) keyFor call site.
+    await window.prefetchHlsAsset(playlistUrl, 1);
+    expect(repo.writeTemp).toHaveBeenCalledTimes(1);
+    const prefetchTimeKey = repo.writeTemp.mock.calls[0]![1];
+
+    // playback-time: ProxyCacheManager's existing (unedited) keyFor call
+    // site, for the SAME segment url.
+    const manager = new CacheManager('cache-key-policy-agreement-test', false);
+    manager.enableMemoryCache(new FreePolicy());
+    (manager as any).putCachedFile(segUrl, manager.cacheFolder);
+    const playbackTimeKey = manager.getCachedFile(segUrl);
+
+    expect(prefetchTimeKey).toBe(keyFor(segUrl));
+    expect(playbackTimeKey).toBe(
+      filePathFor(segUrl, manager.cacheFolder, KEY_PREFIX)
+    );
+    // both derivations agree — the SAME normalized identity, per the
+    // configured default, was used by both unedited call sites.
+    expect(filePathFor(segUrl, manager.cacheFolder, KEY_PREFIX)).toContain(
+      prefetchTimeKey
     );
   });
 });

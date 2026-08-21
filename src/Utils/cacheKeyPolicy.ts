@@ -43,6 +43,22 @@ export const DEFAULT_DENYLIST_PARAMS: string[] = [
   'token',
 ];
 
+let defaultCacheKeyPolicy: CacheKeyPolicyOptions | undefined;
+
+/** Configure a module-level default `CacheKeyPolicyOptions`, consulted by
+ * `normalizeCacheKey`/`keyFor`/`filePathFor` whenever a call site passes no
+ * explicit `policy` argument. Explicit `policy` always wins over this
+ * default; this default always wins over the built-in fallback. */
+export function setDefaultCacheKeyPolicy(policy: CacheKeyPolicyOptions): void {
+  defaultCacheKeyPolicy = policy;
+}
+
+/** The currently configured module-level default, or `undefined` if
+ * `setDefaultCacheKeyPolicy` was never called. */
+export function getDefaultCacheKeyPolicy(): CacheKeyPolicyOptions | undefined {
+  return defaultCacheKeyPolicy;
+}
+
 const AMZ_PREFIX = 'x-amz-';
 
 function isDenylisted(paramName: string, denylist: string[]): boolean {
@@ -60,7 +76,10 @@ function normalizedIdentity(
   policy?: CacheKeyPolicyOptions
 ): { identity: string; fileExt: string } {
   const parsed = new URL(decodeURIComponent(url));
-  const denylist = policy?.denylistParams ?? DEFAULT_DENYLIST_PARAMS;
+  const denylist =
+    policy?.denylistParams ??
+    getDefaultCacheKeyPolicy()?.denylistParams ??
+    DEFAULT_DENYLIST_PARAMS;
 
   const remainingParams: Array<[string, string]> = [];
   parsed.searchParams.forEach((value: string, key: string) => {
@@ -91,9 +110,13 @@ export function normalizeCacheKey(
   const safeUrl = typeof url === 'string' ? url : '';
 
   // Step 1: escape hatch — fully overrides default derivation, not merged.
-  if (policy?.urlKeyExtractor) {
+  // Fallback order: explicit policy.urlKeyExtractor -> module default's
+  // urlKeyExtractor -> undefined (no escape hatch, normal derivation below).
+  const urlKeyExtractor =
+    policy?.urlKeyExtractor ?? getDefaultCacheKeyPolicy()?.urlKeyExtractor;
+  if (urlKeyExtractor) {
     try {
-      const extracted = policy.urlKeyExtractor(safeUrl);
+      const extracted = urlKeyExtractor(safeUrl);
       return { key: extracted, filePath: extracted, usedFailSafe: false };
     } catch (error) {
       return { key: safeUrl, filePath: safeUrl, usedFailSafe: true };
