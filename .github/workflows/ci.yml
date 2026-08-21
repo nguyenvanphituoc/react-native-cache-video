@@ -144,6 +144,10 @@ jobs:
         run: |
           /bin/bash -c "yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null"
 
+      - name: Build config plugin
+        if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
+        run: yarn build:plugin
+
       - name: Expo prebuild (Android)
         if: github.event_name != 'pull_request' || steps.changes.outputs.relevant == 'true'
         working-directory: example-expo
