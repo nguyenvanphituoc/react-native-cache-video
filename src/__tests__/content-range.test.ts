@@ -216,8 +216,7 @@ describe('UC-RangedCacheHitContentRange — kind: hls, two segments (TS-INV-03)'
     const manager = new CacheManager('cr-hls-two-segments', true);
     manager.enableMemoryCache(new FreePolicy());
 
-    const PLAYLIST_URL =
-      'https://cdn.example.com/hls/cr-two-seg/index.m3u8';
+    const PLAYLIST_URL = 'https://cdn.example.com/hls/cr-two-seg/index.m3u8';
     const SEG_A = 'https://cdn.example.com/hls/cr-two-seg/segA.ts';
     const SEG_B = 'https://cdn.example.com/hls/cr-two-seg/segB.ts';
     await ingestHlsPlaylist(manager, PLAYLIST_URL, ['segA.ts', 'segB.ts']);
@@ -398,7 +397,7 @@ describe('UC-RangedCacheHitContentRange — eviction GC tie-in (TS-INV-05)', () 
     expect(segLookup(basePathB)).toBeUndefined();
   });
 
-  it('evicting one segment does not remove a DIFFERENT still-cached asset\'s recorded total', async () => {
+  it("evicting one segment does not remove a DIFFERENT still-cached asset's recorded total", async () => {
     const manager = new CacheManager('cr-eviction-isolated', true);
     manager.enableMemoryCache(new FreePolicy());
 
@@ -433,9 +432,9 @@ describe('UC-RangedCacheHitContentRange — eviction GC tie-in (TS-INV-05)', () 
       manager.didEvictHandler('unrelated-owner-key', unrelatedEntry)
     ).resolves.not.toThrow();
 
-    expect(
-      (manager as any)._segmentTotalLengths.get(basePathA)
-    ).toBe(b64('total-a').length);
+    expect((manager as any)._segmentTotalLengths.get(basePathA)).toBe(
+      b64('total-a').length
+    );
   });
 });
 

@@ -21,7 +21,10 @@ import {
 } from '../Utils/cacheKeyPolicy';
 import { CacheManager } from '../ProxyCacheManager';
 import { FreePolicy } from '../Provider/MemoryCacheFreePolicy';
-import { PrefetchWindow, type VerifiedWriteRepo } from '../Provider/PrefetchWindow';
+import {
+  PrefetchWindow,
+  type VerifiedWriteRepo,
+} from '../Provider/PrefetchWindow';
 import type { PrefetchAwareSessionTask } from '../Libs/session';
 import { KEY_PREFIX } from '../Utils/constants';
 import { resetTestHarness } from '../__mock__/harness';
@@ -296,7 +299,7 @@ describe('TASK-002: package-root export surface', () => {
   it("`import { setDefaultCacheKeyPolicy } from 'react-native-cache-video'` resolves at the package root", () => {
     // package-root import (NOT a relative path) — proves the re-export
     // reaches consumers through src/index.tsx's `export * from './Utils'`.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+
     const pkg = require('react-native-cache-video');
 
     expect(typeof pkg.setDefaultCacheKeyPolicy).toBe('function');
@@ -357,7 +360,10 @@ describe('TASK-003: default policy honored across existing call sites (ProxyCach
   it('a configured default reaches ProxyCacheManager.ts keyFor/filePathFor call sites with ZERO edits to that file', () => {
     setDefaultCacheKeyPolicy({ denylistParams: ['session'] });
 
-    const manager = new CacheManager('cache-key-policy-integration-test', false);
+    const manager = new CacheManager(
+      'cache-key-policy-integration-test',
+      false
+    );
     manager.enableMemoryCache(new FreePolicy());
 
     const withSession = `${BASE_URL}?session=abc123`;
@@ -373,10 +379,7 @@ describe('TASK-003: default policy honored across existing call sites (ProxyCach
   });
 
   it('an unconfigured consumer sees byte-identical pre-existing behavior (no default set)', () => {
-    const manager = new CacheManager(
-      'cache-key-policy-no-default-test',
-      false
-    );
+    const manager = new CacheManager('cache-key-policy-no-default-test', false);
     manager.enableMemoryCache(new FreePolicy());
 
     const withSession = `${BASE_URL}?session=abc123`;
@@ -418,16 +421,15 @@ describe('TASK-003: default policy honored across existing call sites (ProxyCach
 
     // playback-time: ProxyCacheManager's existing (unedited) keyFor call
     // site, for the SAME segment url.
-    const manager = new CacheManager(
-      'cache-key-policy-agreement-test',
-      false
-    );
+    const manager = new CacheManager('cache-key-policy-agreement-test', false);
     manager.enableMemoryCache(new FreePolicy());
     (manager as any).putCachedFile(segUrl, manager.cacheFolder);
     const playbackTimeKey = manager.getCachedFile(segUrl);
 
     expect(prefetchTimeKey).toBe(keyFor(segUrl));
-    expect(playbackTimeKey).toBe(filePathFor(segUrl, manager.cacheFolder, KEY_PREFIX));
+    expect(playbackTimeKey).toBe(
+      filePathFor(segUrl, manager.cacheFolder, KEY_PREFIX)
+    );
     // both derivations agree — the SAME normalized identity, per the
     // configured default, was used by both unedited call sites.
     expect(filePathFor(segUrl, manager.cacheFolder, KEY_PREFIX)).toContain(
