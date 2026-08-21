@@ -20,6 +20,27 @@ export interface Spec extends TurboModule {
     body: string,
     headersJson?: string
   ): void;
+  // Streams an OkHttp response for `url` directly to `destPath` via Okio's file
+  // sink (constant-size buffer, never held whole in memory). `headersJson` uses
+  // the same JSON-encoded-string convention as `respond`'s fifth argument —
+  // deliberately not a new codegen object type. Resolves a JSON-encoded string:
+  // {status, headers, contentLength, contentRange}. Non-2xx origin status still
+  // RESOLVES (mirrors blob-util's existing contract); IOException/socket error
+  // mid-stream, a write failure to destPath, or a concurrent cancelDownload for
+  // the same requestId all REJECT.
+  // See shapeup/android-streamed-downloads/spec/contracts/android-download-transport.contract.md#Method-downloadToFile
+  downloadToFile(
+    url: string,
+    headersJson: string,
+    destPath: string,
+    requestId: string
+  ): Promise<string>;
+  // Cancels the tracked OkHttp Call for `requestId`, aborting its streaming
+  // read so the corresponding `downloadToFile` promise rejects. Resolves as a
+  // no-op (never rejects) when `requestId` has no tracked in-flight Call —
+  // already completed, already cancelled, or never started.
+  // See shapeup/android-streamed-downloads/spec/contracts/android-download-transport.contract.md#Method-cancelDownload
+  cancelDownload(requestId: string): Promise<void>;
 }
 
 export default TurboModuleRegistry.getEnforcing<Spec>('CacheVideoHttpProxy');

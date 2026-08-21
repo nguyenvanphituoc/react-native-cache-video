@@ -180,6 +180,29 @@ RCT_EXPORT_METHOD(respond: (NSString *) requestId
     }
 }
 
+// iOS Conformance (A5) — reject-"not implemented" stubs satisfying
+// <NativeCacheVideoHttpProxySpec> protocol conformance (RH1) after codegen adds
+// downloadToFile/cancelDownload to the shared Spec for the Android streaming-download
+// transport. JS never calls either on iOS (A3's `Platform.OS === 'android'` gate) — no
+// functional iOS download behavior change (R5). See
+// shapeup/android-streamed-downloads/spec/contracts/android-download-transport.contract.md#iOS-Conformance-A5.
+RCT_EXPORT_METHOD(downloadToFile: (NSString *) url
+                  headersJson: (NSString *) headersJson
+                  destPath: (NSString *) destPath
+                  requestId: (NSString *) requestId
+                  resolve: (RCTPromiseResolveBlock) resolve
+                  reject: (RCTPromiseRejectBlock) reject)
+{
+    reject(@"NOT_IMPLEMENTED", @"downloadToFile is not implemented on iOS — the Android-only transport fix does not apply here", nil);
+}
+
+RCT_EXPORT_METHOD(cancelDownload: (NSString *) requestId
+                  resolve: (RCTPromiseResolveBlock) resolve
+                  reject: (RCTPromiseRejectBlock) reject)
+{
+    reject(@"NOT_IMPLEMENTED", @"cancelDownload is not implemented on iOS — the Android-only transport fix does not apply here", nil);
+}
+
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
     (const facebook::react::ObjCTurboModule::InitParams &)params
 {

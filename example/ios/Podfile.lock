@@ -1776,7 +1776,7 @@ PODS:
     - ReactCommon/turbomodule/core
     - SocketRocket
     - Yoga
-  - react-native-cache-video (0.4.0):
+  - react-native-cache-video (0.5.0):
     - boost
     - DoubleConversion
     - fast_float
@@ -2673,7 +2673,7 @@ SPEC CHECKSUMS:
   React-Mapbuffer: 8f8bba0802f49d7926602c5c276f2a2083a5ac55
   React-microtasksnativemodule: 1e4d3178ba5d5000b351b902c603fb0c9d60649e
   react-native-blob-util: 597cb703d6dee59abec9754daf3d7951512bb132
-  react-native-cache-video: 76c504736e32ed59639f98921ac4c3ad8f7bf1db
+  react-native-cache-video: cd1d0eeb24bebfd4aa886fc438c67b6b108096f3
   react-native-video: f8e9788554c53a1852166cd119d6e7c324b16dfe
   React-NativeModulesApple: 183f9bd5b20a51a8b016e90be78ed6c1538da4a7
   React-oscompat: d5e3366fbd6c7150e17c1bda85eab583a6fa9fce
