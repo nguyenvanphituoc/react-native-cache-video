@@ -74,6 +74,7 @@ Everything discovered funnels into `.shapeup/<slug>/discovery/ledger.md` (Orient
   on first touch. `--subgraph run` is the fast-forward as one bounded query; `--trace <node>` walks
   a verdict back to the objective, the plan, the source, the execution record and the gate that
   crossed it.
+- `/hill-chart` (skill `hill-chart`, not a pipeline worker — invoked directly, like `shapeup`) renders both the committed hill shards (`shapeup/<slug>/hill/<scope-id>.yml`, the mechanical phase from the invariant above) and the local run graph as one dashboard: a portfolio card per pitch, and per-pitch a Hill Chart, an attention list, a scope board, round history, and the run graph one click deeper. A pitch whose local run trace was cleaned up after shipping still renders — marked Archived — from its committed hill shards alone.
 - Contracts: markdown on disk, JSON on the wire; a single library reads/writes the file form.
 - Never hard-code a storage root — generated paths resolve through the shared path resolver.
 - The traceability oracle emits `.shapeup/<slug>/trace/report.json` from the spine artifacts.
